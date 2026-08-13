@@ -232,7 +232,7 @@ fn handle(request: Request, cfg: &Config, db: &Db, token: &str) {
     let body = match method {
         "ping" => ok_envelope(""),
         "getLicense" => ok_envelope("<license valid=\"true\"/>"),
-        _ => match handle_browse(method, &query, db) {
+        _ => match handle_browse(method, &query, db).or_else(|| handle_playlists(method, &query, db)) {
             Some(body) => body,
             // A `None` from a handler it *does* own means the id was bad;
             // for a method it doesn't own it means unsupported. Both are
@@ -427,6 +427,76 @@ fn album_element(album: &Album, tag: &str) -> String {
 }
 
 // --------------------------------------------------------------- handlers
+
+pub fn playlist_id(id: i64) -> String {
+    format!("pl{id}")
+}
+
+pub fn parse_playlist_id(id: &str) -> Option<i64> {
+    id.strip_prefix("pl")?.parse().ok()
+}
+
+fn handle_playlists(method: &str, query: &HashMap<String, String>, db: &Db) -> Option<String> {
+    match method {
+        "getPlaylists" => {
+            let playlists = db.list_playlists().unwrap_or_default();
+            let mut out = String::from("<playlists>");
+            for p in &playlists {
+                let ids = db.playlist_track_ids(p.id).unwrap_or_default();
+                // Duration needs the tracks anyway; the library is a few
+                // thousand rows and this is a once-per-open request.
+                let duration: i64 = ids
+                    .iter()
+                    .filter_map(|id| db.get_track(*id).ok().flatten())
+                    .map(|t| t.duration_ms / 1000)
+                    .sum();
+                out.push_str(&format!(
+                    "<playlist id=\"{}\" name=\"{}\" songCount=\"{}\" duration=\"{duration}\" \
+                     owner=\"melodie\" public=\"false\"/>",
+                    playlist_id(p.id),
+                    escape_xml(&p.name),
+                    ids.len(),
+                ));
+            }
+            out.push_str("</playlists>");
+            Some(ok_envelope(&out))
+        }
+
+        "getPlaylist" => {
+            let raw = query.get("id")?;
+            let id = parse_playlist_id(raw)?;
+            let playlists = db.list_playlists().unwrap_or_default();
+            let playlist = playlists.iter().find(|p| p.id == id)?;
+            let track_ids = db.playlist_track_ids(id).unwrap_or_default();
+
+            // Reuse the browse grouping so `<entry>` carries the same album
+            // and artist ids the rest of the API hands out.
+            let groups = group_library(db.list_tracks().unwrap_or_default());
+            let mut entries = String::new();
+            let mut duration = 0;
+            for track_id_value in &track_ids {
+                let Some((track, album)) = groups
+                    .iter()
+                    .flat_map(|a| &a.albums)
+                    .find_map(|al| al.tracks.iter().find(|t| t.id == *track_id_value).map(|t| (t, al)))
+                else {
+                    continue;
+                };
+                duration += track.duration_ms / 1000;
+                entries.push_str(&song_xml(track, album).replacen("<song ", "<entry ", 1));
+            }
+            Some(ok_envelope(&format!(
+                "<playlist id=\"{}\" name=\"{}\" songCount=\"{}\" duration=\"{duration}\" \
+                 owner=\"melodie\" public=\"false\">{entries}</playlist>",
+                playlist_id(playlist.id),
+                escape_xml(&playlist.name),
+                track_ids.len(),
+            )))
+        }
+
+        _ => None,
+    }
+}
 
 fn handle_browse(method: &str, query: &HashMap<String, String>, db: &Db) -> Option<String> {
     let groups = || -> Vec<ArtistGroup> {
@@ -841,6 +911,77 @@ mod tests {
 
         let (_s, _h, body6) = http_get(handle.addr, &format!("/rest/getMusicFolders.view?{auth}"));
         assert!(String::from_utf8_lossy(&body6).contains("musicFolder"), "{body6:?}");
+
+        handle.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Same library as `seeded_server`, plus a playlist holding both tracks.
+    fn seeded_server_with_playlist() -> (ServerHandle, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("melodie-pl-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.mp3");
+        let b = dir.join("b.mp3");
+        std::fs::write(&a, vec![0xAAu8; 5000]).unwrap();
+        std::fs::write(&b, vec![0xBBu8; 4000]).unwrap();
+
+        let db = Arc::new(Db::open(Path::new(":memory:")).unwrap());
+        let mut ids = Vec::new();
+        for (path, artist, album, title) in [
+            (&a, "Aphex Twin", "SAW II", "Rhubarb"),
+            (&b, "Boards of Canada", "Geogaddi", "Dandelion"),
+        ] {
+            ids.push(
+                db.upsert_track(&crate::db::NewTrack {
+                    path: path.to_str().unwrap(),
+                    title,
+                    artist,
+                    album,
+                    track_no: Some(1),
+                    duration_ms: 210_000,
+                    mtime: 1,
+                    size: std::fs::metadata(path).unwrap().len() as i64,
+                })
+                .unwrap(),
+            );
+        }
+        let pl = db.upsert_playlist("Chill", "m3u8", None).unwrap();
+        db.set_playlist_tracks(pl, &ids).unwrap();
+        assert_eq!(pl, 1, "test assumes the first playlist gets id 1");
+
+        let mut cfg = Config::default();
+        cfg.lan_enabled = true;
+        cfg.lan_bind = "127.0.0.1".to_string();
+        cfg.lan_port = 0;
+        cfg.lan_token = "testtoken".to_string();
+        let handle = spawn(&cfg, db).expect("server starts");
+        (handle, dir)
+    }
+
+    #[test]
+    fn playlist_ids_round_trip() {
+        assert_eq!(playlist_id(4), "pl4");
+        assert_eq!(parse_playlist_id("pl4"), Some(4));
+        assert_eq!(parse_playlist_id("tr4"), None);
+    }
+
+    #[test]
+    fn playlists_are_listed_and_expandable() {
+        let (handle, dir) = seeded_server_with_playlist();
+        let auth = "u=m&p=testtoken&c=test";
+
+        let (_s, _h, body) = http_get(handle.addr, &format!("/rest/getPlaylists.view?{auth}"));
+        let body = String::from_utf8_lossy(&body).into_owned();
+        assert!(body.contains("Chill"), "{body}");
+        assert!(body.contains("songCount=\"2\""), "{body}");
+
+        let (_s, _h, body2) =
+            http_get(handle.addr, &format!("/rest/getPlaylist.view?{auth}&id=pl1"));
+        let body2 = String::from_utf8_lossy(&body2).into_owned();
+        assert!(body2.contains("<entry "), "{body2}");
+        assert!(body2.contains("Rhubarb"), "{body2}");
+        assert!(body2.contains("Dandelion"), "{body2}");
 
         handle.stop();
         let _ = std::fs::remove_dir_all(dir);
