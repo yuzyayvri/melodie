@@ -288,7 +288,7 @@ pub struct Album {
 
 impl Album {
     fn duration_secs(&self) -> i64 {
-        self.tracks.iter().map(|t| t.duration_ms / 1000).sum()
+        self.tracks.iter().map(|t| t.duration_ms).sum::<i64>() / 1000
     }
 }
 
@@ -305,7 +305,7 @@ pub struct ArtistGroup {
 pub fn group_library(tracks: Vec<crate::db::Track>) -> Vec<ArtistGroup> {
     let mut artists: Vec<ArtistGroup> = Vec::new();
     for track in tracks {
-        if artists.last().map(|a| a.name != track.artist).unwrap_or(true) {
+        if artists.last().map(|a| !a.name.eq_ignore_ascii_case(&track.artist)).unwrap_or(true) {
             artists.push(ArtistGroup {
                 id: artist_id(&track.artist),
                 name: track.artist.clone(),
@@ -313,7 +313,7 @@ pub fn group_library(tracks: Vec<crate::db::Track>) -> Vec<ArtistGroup> {
             });
         }
         let artist = artists.last_mut().expect("just pushed");
-        if artist.albums.last().map(|al| al.name != track.album).unwrap_or(true) {
+        if artist.albums.last().map(|al| !al.name.eq_ignore_ascii_case(&track.album)).unwrap_or(true) {
             artist.albums.push(Album {
                 id: album_id(&track.artist, &track.album),
                 name: track.album.clone(),
@@ -735,6 +735,21 @@ mod tests {
         assert_eq!(groups[0].albums[0].tracks.len(), 2);
         assert_eq!(groups[1].albums.len(), 1);
         assert_eq!(groups[0].albums[0].artist_id, groups[0].id);
+    }
+
+    #[test]
+    fn group_library_handles_case_insensitive_artist_names() {
+        // Two tracks with the same artist under different casing (AC/DC vs Ac/Dc)
+        // and different albums, sorted so they wouldn't be adjacent if comparisons
+        // were case-sensitive.
+        let tracks = vec![
+            track(1, "AC/DC", "Back in Black", "Hells Bells", 1),
+            track(2, "Ac/Dc", "Back in Black", "You Shook Me", 2),
+        ];
+        let groups = group_library(tracks);
+        assert_eq!(groups.len(), 1, "should produce exactly one ArtistGroup for case-insensitive match");
+        assert_eq!(groups[0].albums.len(), 1, "should have one album");
+        assert_eq!(groups[0].albums[0].tracks.len(), 2, "both tracks should be under the same album");
     }
 
     #[test]
