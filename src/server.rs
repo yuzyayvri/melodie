@@ -160,8 +160,11 @@ pub struct ServerHandle {
 
 impl ServerHandle {
     pub fn stop(self) {
-        // Wakes every thread blocked in `recv()` so they can exit.
-        self.server.unblock();
+        // unblock() wakes only one recv()-blocked thread per call (see its
+        // docs) — call it once per worker thread so all of them exit.
+        for _ in 0..self.threads.len() {
+            self.server.unblock();
+        }
         for t in self.threads {
             let _ = t.join();
         }
