@@ -228,15 +228,288 @@ fn handle(request: Request, cfg: &Config, db: &Db, token: &str) {
         return;
     }
 
-    let body = match method_of(&url) {
+    let method = method_of(&url);
+    let body = match method {
         "ping" => ok_envelope(""),
         "getLicense" => ok_envelope("<license valid=\"true\"/>"),
-        _ => error_envelope(70, "Requested data was not found"),
+        _ => match handle_browse(method, &query, db) {
+            Some(body) => body,
+            // A `None` from a handler it *does* own means the id was bad;
+            // for a method it doesn't own it means unsupported. Both are
+            // "not found" to a Subsonic client (code 70).
+            None => error_envelope(70, "Requested data was not found"),
+        },
     };
     let _ = request.respond(xml_response(body));
 
-    // Silence unused-parameter warnings until later tasks use these.
-    let _ = (cfg, db);
+    let _ = cfg;
+}
+
+// --------------------------------------------------------------- identity
+
+/// FNV-1a. Not cryptographic and does not need to be: these IDs are opaque
+/// handles a client echoes back, and the only requirement is that the same
+/// artist/album string maps to the same ID across requests and restarts.
+fn fnv1a(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in s.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+pub fn artist_id(artist: &str) -> String {
+    format!("ar{:016x}", fnv1a(artist))
+}
+
+pub fn album_id(artist: &str, album: &str) -> String {
+    // \u{1} can't occur in a tag, so ("ab","c") and ("a","bc") can't collide.
+    format!("al{:016x}", fnv1a(&format!("{artist}\u{1}{album}")))
+}
+
+pub fn track_id(id: i64) -> String {
+    format!("tr{id}")
+}
+
+pub fn parse_track_id(id: &str) -> Option<i64> {
+    id.strip_prefix("tr")?.parse().ok()
+}
+
+// --------------------------------------------------------------- grouping
+
+pub struct Album {
+    pub id: String,
+    pub name: String,
+    pub artist: String,
+    pub artist_id: String,
+    pub tracks: Vec<crate::db::Track>,
+}
+
+impl Album {
+    fn duration_secs(&self) -> i64 {
+        self.tracks.iter().map(|t| t.duration_ms / 1000).sum()
+    }
+}
+
+pub struct ArtistGroup {
+    pub id: String,
+    pub name: String,
+    pub albums: Vec<Album>,
+}
+
+/// Folds the track list into artists -> albums.
+///
+/// `Db::list_tracks` already orders by artist, album, track_no, title, so
+/// this is a linear pass, not a sort or a hash map.
+pub fn group_library(tracks: Vec<crate::db::Track>) -> Vec<ArtistGroup> {
+    let mut artists: Vec<ArtistGroup> = Vec::new();
+    for track in tracks {
+        if artists.last().map(|a| a.name != track.artist).unwrap_or(true) {
+            artists.push(ArtistGroup {
+                id: artist_id(&track.artist),
+                name: track.artist.clone(),
+                albums: Vec::new(),
+            });
+        }
+        let artist = artists.last_mut().expect("just pushed");
+        if artist.albums.last().map(|al| al.name != track.album).unwrap_or(true) {
+            artist.albums.push(Album {
+                id: album_id(&track.artist, &track.album),
+                name: track.album.clone(),
+                artist: track.artist.clone(),
+                artist_id: artist.id.clone(),
+                tracks: Vec::new(),
+            });
+        }
+        artist.albums.last_mut().expect("just pushed").tracks.push(track);
+    }
+    artists
+}
+
+fn extension_of(path: &str) -> String {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn content_type_for(ext: &str) -> &'static str {
+    match ext {
+        "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
+        "m4a" | "mp4" | "m4b" => "audio/mp4",
+        "ogg" | "oga" => "audio/ogg",
+        "wav" => "audio/wav",
+        _ => "application/octet-stream",
+    }
+}
+
+/// The `<song>` element, shared by getAlbum, getPlaylist and
+/// getMusicDirectory (Subsonic uses `<child>` for the last one, but the
+/// attribute set is identical, so the caller just renames the tag).
+pub fn song_xml(t: &crate::db::Track, album: &Album) -> String {
+    let ext = extension_of(&t.path);
+    let track_attr = match t.track_no {
+        Some(n) => format!(" track=\"{n}\""),
+        None => String::new(),
+    };
+    format!(
+        "<song id=\"{id}\" parent=\"{album_id}\" isDir=\"false\" title=\"{title}\" \
+         album=\"{album}\" artist=\"{artist}\"{track_attr} duration=\"{duration}\" \
+         size=\"{size}\" suffix=\"{suffix}\" contentType=\"{ctype}\" \
+         albumId=\"{album_id}\" artistId=\"{artist_id}\" coverArt=\"{id}\" type=\"music\"/>",
+        id = track_id(t.id),
+        album_id = album.id,
+        artist_id = album.artist_id,
+        title = escape_xml(&t.title),
+        album = escape_xml(&t.album),
+        artist = escape_xml(&t.artist),
+        duration = t.duration_ms / 1000,
+        size = t.size,
+        suffix = escape_xml(&ext),
+        ctype = content_type_for(&ext),
+    )
+}
+
+/// The bucket letter a name sorts under in `getIndexes`/`getArtists`.
+fn index_letter(name: &str) -> String {
+    match name.chars().next() {
+        Some(c) if c.is_ascii_alphabetic() => c.to_ascii_uppercase().to_string(),
+        Some(_) => "#".to_string(),
+        None => "#".to_string(),
+    }
+}
+
+fn indexes_xml(groups: &[ArtistGroup], with_album_count: bool) -> String {
+    let mut out = String::new();
+    let mut current = String::new();
+    for artist in groups {
+        let letter = index_letter(&artist.name);
+        if letter != current {
+            if !current.is_empty() {
+                out.push_str("</index>");
+            }
+            out.push_str(&format!("<index name=\"{}\">", escape_xml(&letter)));
+            current = letter;
+        }
+        let count = if with_album_count {
+            format!(" albumCount=\"{}\"", artist.albums.len())
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "<artist id=\"{}\" name=\"{}\"{count}/>",
+            artist.id,
+            escape_xml(&artist.name)
+        ));
+    }
+    if !current.is_empty() {
+        out.push_str("</index>");
+    }
+    out
+}
+
+fn album_element(album: &Album, tag: &str) -> String {
+    format!(
+        "<{tag} id=\"{id}\" name=\"{name}\" title=\"{name}\" artist=\"{artist}\" \
+         artistId=\"{artist_id}\" parent=\"{artist_id}\" isDir=\"true\" \
+         songCount=\"{songs}\" duration=\"{duration}\" coverArt=\"{id}\"/>",
+        id = album.id,
+        name = escape_xml(&album.name),
+        artist = escape_xml(&album.artist),
+        artist_id = album.artist_id,
+        songs = album.tracks.len(),
+        duration = album.duration_secs(),
+    )
+}
+
+// --------------------------------------------------------------- handlers
+
+fn handle_browse(method: &str, query: &HashMap<String, String>, db: &Db) -> Option<String> {
+    let groups = || -> Vec<ArtistGroup> {
+        group_library(db.list_tracks().unwrap_or_else(|e| {
+            eprintln!("melodie: LAN server could not read the library: {e:#}");
+            Vec::new()
+        }))
+    };
+
+    match method {
+        "getMusicFolders" => Some(ok_envelope(
+            "<musicFolders><musicFolder id=\"0\" name=\"Melodie\"/></musicFolders>",
+        )),
+
+        "getIndexes" => Some(ok_envelope(&format!(
+            "<indexes lastModified=\"0\" ignoredArticles=\"The El La Los Las Le Les\">{}</indexes>",
+            indexes_xml(&groups(), false)
+        ))),
+
+        "getArtists" => Some(ok_envelope(&format!(
+            "<artists ignoredArticles=\"The El La Los Las Le Les\">{}</artists>",
+            indexes_xml(&groups(), true)
+        ))),
+
+        "getArtist" => {
+            let id = query.get("id")?;
+            let all = groups();
+            let artist = all.iter().find(|a| &a.id == id)?;
+            let albums: String = artist.albums.iter().map(|al| album_element(al, "album")).collect();
+            Some(ok_envelope(&format!(
+                "<artist id=\"{}\" name=\"{}\" albumCount=\"{}\">{albums}</artist>",
+                artist.id,
+                escape_xml(&artist.name),
+                artist.albums.len()
+            )))
+        }
+
+        "getAlbum" => {
+            let id = query.get("id")?;
+            let all = groups();
+            let album = all.iter().flat_map(|a| &a.albums).find(|al| &al.id == id)?;
+            let songs: String = album.tracks.iter().map(|t| song_xml(t, album)).collect();
+            Some(ok_envelope(&format!(
+                "<album id=\"{id}\" name=\"{name}\" artist=\"{artist}\" artistId=\"{artist_id}\" \
+                 songCount=\"{count}\" duration=\"{duration}\" coverArt=\"{id}\">{songs}</album>",
+                name = escape_xml(&album.name),
+                artist = escape_xml(&album.artist),
+                artist_id = album.artist_id,
+                count = album.tracks.len(),
+                duration = album.duration_secs(),
+            )))
+        }
+
+        // One endpoint, two meanings: an artist id lists its albums, an album
+        // id lists its songs. That is what the folder-browsing family is.
+        "getMusicDirectory" => {
+            let id = query.get("id")?;
+            let all = groups();
+            if let Some(artist) = all.iter().find(|a| &a.id == id) {
+                let children: String =
+                    artist.albums.iter().map(|al| album_element(al, "child")).collect();
+                return Some(ok_envelope(&format!(
+                    "<directory id=\"{}\" name=\"{}\">{children}</directory>",
+                    artist.id,
+                    escape_xml(&artist.name)
+                )));
+            }
+            let album = all.iter().flat_map(|a| &a.albums).find(|al| &al.id == id)?;
+            let children: String = album
+                .tracks
+                .iter()
+                .map(|t| song_xml(t, album).replacen("<song ", "<child ", 1))
+                .collect();
+            Some(ok_envelope(&format!(
+                "<directory id=\"{}\" parent=\"{}\" name=\"{}\">{children}</directory>",
+                album.id,
+                album.artist_id,
+                escape_xml(&album.name)
+            )))
+        }
+
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -416,5 +689,145 @@ mod tests {
         assert!(body.contains("status=\"failed\""), "body was {body}");
         assert!(body.contains("code=\"70\""), "unsupported method is code 70: {body}");
         handle.stop();
+    }
+
+    fn track(id: i64, artist: &str, album: &str, title: &str, no: i64) -> crate::db::Track {
+        crate::db::Track {
+            id,
+            path: format!("/music/{artist}/{album}/{title}.mp3"),
+            title: title.to_string(),
+            artist: artist.to_string(),
+            album: album.to_string(),
+            track_no: Some(no),
+            duration_ms: 210_000,
+            mtime: 1,
+            size: 3_400_000,
+            added_at: 1,
+        }
+    }
+
+    #[test]
+    fn ids_are_stable_prefixed_and_distinct() {
+        assert_eq!(artist_id("Boards of Canada"), artist_id("Boards of Canada"));
+        assert_ne!(artist_id("Boards of Canada"), artist_id("Board of Canada"));
+        assert!(artist_id("x").starts_with("ar"));
+        assert!(album_id("a", "b").starts_with("al"));
+        // The separator must keep ("ab","c") from colliding with ("a","bc").
+        assert_ne!(album_id("ab", "c"), album_id("a", "bc"));
+        assert_eq!(track_id(7), "tr7");
+        assert_eq!(parse_track_id("tr7"), Some(7));
+        assert_eq!(parse_track_id("al1234"), None);
+        assert_eq!(parse_track_id("trxyz"), None);
+    }
+
+    #[test]
+    fn group_library_nests_albums_under_artists() {
+        let tracks = vec![
+            track(1, "Aphex Twin", "SAW II", "Rhubarb", 1),
+            track(2, "Aphex Twin", "SAW II", "Curtains", 2),
+            track(3, "Aphex Twin", "Drukqs", "Avril 14th", 1),
+            track(4, "Boards of Canada", "Music Has the Right", "Roygbiv", 1),
+        ];
+        let groups = group_library(tracks);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "Aphex Twin");
+        assert_eq!(groups[0].albums.len(), 2);
+        assert_eq!(groups[0].albums[0].tracks.len(), 2);
+        assert_eq!(groups[1].albums.len(), 1);
+        assert_eq!(groups[0].albums[0].artist_id, groups[0].id);
+    }
+
+    #[test]
+    fn song_xml_escapes_metadata_and_reports_a_content_type() {
+        let t = track(9, "AC/DC", "Back in Black", "Rock & Roll <live>", 3);
+        let groups = group_library(vec![t.clone()]);
+        let album = &groups[0].albums[0];
+        let xml = song_xml(&t, album);
+        assert!(xml.contains("title=\"Rock &amp; Roll &lt;live&gt;\""), "{xml}");
+        assert!(xml.contains("id=\"tr9\""), "{xml}");
+        assert!(xml.contains("contentType=\"audio/mpeg\""), "{xml}");
+        assert!(xml.contains("suffix=\"mp3\""), "{xml}");
+        assert!(xml.contains("duration=\"210\""), "seconds, not ms: {xml}");
+        assert!(xml.contains(&format!("albumId=\"{}\"", album.id)), "{xml}");
+    }
+
+    /// A DB with two real tracks. Returns the temp dir so the caller keeps it
+    /// alive — dropping it deletes the files.
+    fn seeded_server() -> (ServerHandle, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("melodie-server-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Real bytes on disk so `stream` has something to serve.
+        let a = dir.join("a.mp3");
+        let b = dir.join("b.mp3");
+        std::fs::write(&a, vec![0xAAu8; 5000]).unwrap();
+        std::fs::write(&b, vec![0xBBu8; 4000]).unwrap();
+
+        let db = Arc::new(Db::open(Path::new(":memory:")).unwrap());
+        for (path, artist, album, title, no) in [
+            (&a, "Aphex Twin", "SAW II", "Rhubarb", 1i64),
+            (&b, "Boards of Canada", "Geogaddi", "Dandelion", 1),
+        ] {
+            db.upsert_track(&crate::db::NewTrack {
+                path: path.to_str().unwrap(),
+                title,
+                artist,
+                album,
+                track_no: Some(no),
+                duration_ms: 210_000,
+                mtime: 1,
+                size: std::fs::metadata(path).unwrap().len() as i64,
+            })
+            .unwrap();
+        }
+
+        let mut cfg = Config::default();
+        cfg.lan_enabled = true;
+        cfg.lan_bind = "127.0.0.1".to_string();
+        cfg.lan_port = 0;
+        cfg.lan_token = "testtoken".to_string();
+        let handle = spawn(&cfg, db).expect("server starts");
+        (handle, dir)
+    }
+
+    #[test]
+    fn browse_endpoints_expose_the_library() {
+        let (handle, dir) = seeded_server();
+        let auth = "u=m&p=testtoken&c=test";
+
+        let (_s, _h, body) = http_get(handle.addr, &format!("/rest/getIndexes.view?{auth}"));
+        let body = String::from_utf8_lossy(&body).into_owned();
+        assert!(body.contains("Aphex Twin"), "{body}");
+        assert!(body.contains("Boards of Canada"), "{body}");
+        assert!(body.contains("<index name=\"A\">"), "indexed by first letter: {body}");
+
+        let (_s, _h, body2) = http_get(handle.addr, &format!("/rest/getArtists.view?{auth}"));
+        let body2 = String::from_utf8_lossy(&body2).into_owned();
+        assert!(body2.contains("albumCount=\"1\""), "{body2}");
+
+        // Drill into the first artist via the id the listing just handed us.
+        let aphex = artist_id("Aphex Twin");
+        let (_s, _h, body3) =
+            http_get(handle.addr, &format!("/rest/getMusicDirectory.view?{auth}&id={aphex}"));
+        let body3 = String::from_utf8_lossy(&body3).into_owned();
+        assert!(body3.contains("SAW II"), "{body3}");
+        assert!(body3.contains("isDir=\"true\""), "album children are directories: {body3}");
+
+        let saw = album_id("Aphex Twin", "SAW II");
+        let (_s, _h, body4) = http_get(handle.addr, &format!("/rest/getAlbum.view?{auth}&id={saw}"));
+        let body4 = String::from_utf8_lossy(&body4).into_owned();
+        assert!(body4.contains("Rhubarb"), "{body4}");
+        assert!(body4.contains("<song "), "{body4}");
+
+        let (_s, _h, body5) =
+            http_get(handle.addr, &format!("/rest/getMusicDirectory.view?{auth}&id={saw}"));
+        let body5 = String::from_utf8_lossy(&body5).into_owned();
+        assert!(body5.contains("Rhubarb"), "album directory lists songs: {body5}");
+
+        let (_s, _h, body6) = http_get(handle.addr, &format!("/rest/getMusicFolders.view?{auth}"));
+        assert!(String::from_utf8_lossy(&body6).contains("musicFolder"), "{body6:?}");
+
+        handle.stop();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
