@@ -6,6 +6,8 @@ mod library;
 mod mediakeys;
 mod net;
 mod playlist;
+#[cfg(feature = "lan")]
+mod server;
 mod spotisync;
 mod ui;
 mod util;
