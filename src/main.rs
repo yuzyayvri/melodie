@@ -4,6 +4,7 @@ mod db;
 mod engine;
 mod library;
 mod mediakeys;
+mod net;
 mod playlist;
 mod spotisync;
 mod ui;

@@ -9,6 +9,12 @@ license = "MIT"
 name = "melodie"
 path = "src/main.rs"
 
+[features]
+# Compiled in by default; the server still only binds when config.toml sets
+# `lan_enabled = true` (PLAN.md §7: "off by default" = runtime, not a recompile).
+default = ["lan"]
+lan = ["dep:tiny_http", "dep:md5", "dep:fastrand", "dep:qrcode"]
+
 [dependencies]
 # UI: statically-linked FLTK, ~1MB RSS class, retained-mode (zero idle CPU).
 fltk = "1"
@@ -48,6 +54,18 @@ toml = "0.8"
 dirs = "5"
 
 anyhow = "1"
+
+# --- feature "lan" (PLAN.md §7 Tier 0) ---
+# Synchronous HTTP. Deliberately not axum/hyper: no async runtime in this
+# binary at all (PLAN.md §2).
+tiny_http = { version = "0.12", optional = true }
+# Subsonic's salted-token auth is defined as md5(password + salt).
+md5 = { version = "0.8", optional = true }
+# LAN token generation. Tiny, zero-dependency alternative to `rand`.
+fastrand = { version = "2", optional = true }
+# Pairing QR. default-features off drops the `image`/`svg` renderers (and
+# their dependency trees) — Melodie renders the bit matrix itself.
+qrcode = { version = "0.14", default-features = false, optional = true }
 
 [profile.release]
 lto = "fat"

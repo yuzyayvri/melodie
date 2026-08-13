@@ -21,6 +21,20 @@ pub struct Config {
     pub ytdlp_extra_args: Vec<String>,
     /// Starting playback volume, 0.0-1.0.
     pub default_volume: f32,
+    /// Serve the library over the LAN (PLAN.md §7 Tier 0). Off by default:
+    /// a music player should not open a socket nobody asked for.
+    pub lan_enabled: bool,
+    /// Port for the Subsonic API. 4533 is the Navidrome/Subsonic convention,
+    /// so clients often pre-fill it.
+    pub lan_port: u16,
+    /// Address to bind. Empty = auto-detect this machine's LAN IP. A public
+    /// address is refused unless `lan_allow_public` is set (PLAN.md §9).
+    pub lan_bind: String,
+    /// Shared secret every request must present. Generated on first use;
+    /// there are no accounts (PLAN.md §7: "no login, no account").
+    pub lan_token: String,
+    /// Escape hatch for binding a non-private address. Leave false.
+    pub lan_allow_public: bool,
 }
 
 impl Default for Config {
@@ -40,6 +54,11 @@ impl Default for Config {
             ytdlp_path: "yt-dlp".to_string(),
             ytdlp_extra_args: Vec::new(),
             default_volume: 0.8,
+            lan_enabled: false,
+            lan_port: 4533,
+            lan_bind: String::new(),
+            lan_token: String::new(),
+            lan_allow_public: false,
         }
     }
 }
@@ -111,9 +130,41 @@ impl Config {
         Ok(())
     }
 
+    /// Generates `lan_token` if it is unset. Returns true when it changed,
+    /// so the caller knows to `save()`.
+    #[cfg(feature = "lan")]
+    pub fn ensure_lan_token(&mut self) -> bool {
+        if !self.lan_token.is_empty() {
+            return false;
+        }
+        // 32 alphanumeric chars ~= 190 bits. It travels in a URL query
+        // string, so keep it to characters that need no escaping.
+        self.lan_token = (0..32).map(|_| fastrand::alphanumeric()).collect();
+        true
+    }
+
     /// True if `path` sits under a reserved subdirectory that the scanner
     /// must not treat as a music file.
     pub fn is_reserved(&self, path: &Path) -> bool {
         path.starts_with(self.playlists_dir()) || path.starts_with(self.inbox_dir())
+    }
+}
+
+#[cfg(all(test, feature = "lan"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_lan_token_generates_once_and_is_stable() {
+        let mut cfg = Config::default();
+        assert!(cfg.lan_token.is_empty());
+
+        assert!(cfg.ensure_lan_token(), "first call generates and reports a change");
+        let first = cfg.lan_token.clone();
+        assert!(first.len() >= 24, "token must be long enough to not be guessable: {first}");
+        assert!(first.chars().all(|c| c.is_ascii_alphanumeric()), "URL-safe: {first}");
+
+        assert!(!cfg.ensure_lan_token(), "second call is a no-op");
+        assert_eq!(cfg.lan_token, first);
     }
 }
