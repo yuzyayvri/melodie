@@ -448,8 +448,8 @@ fn handle_playlists(method: &str, query: &HashMap<String, String>, db: &Db) -> O
                 let duration: i64 = ids
                     .iter()
                     .filter_map(|id| db.get_track(*id).ok().flatten())
-                    .map(|t| t.duration_ms / 1000)
-                    .sum();
+                    .map(|t| t.duration_ms)
+                    .sum::<i64>() / 1000;
                 out.push_str(&format!(
                     "<playlist id=\"{}\" name=\"{}\" songCount=\"{}\" duration=\"{duration}\" \
                      owner=\"melodie\" public=\"false\"/>",
@@ -473,7 +473,7 @@ fn handle_playlists(method: &str, query: &HashMap<String, String>, db: &Db) -> O
             // and artist ids the rest of the API hands out.
             let groups = group_library(db.list_tracks().unwrap_or_default());
             let mut entries = String::new();
-            let mut duration = 0;
+            let mut duration_ms_total: i64 = 0;
             for track_id_value in &track_ids {
                 let Some((track, album)) = groups
                     .iter()
@@ -482,9 +482,10 @@ fn handle_playlists(method: &str, query: &HashMap<String, String>, db: &Db) -> O
                 else {
                     continue;
                 };
-                duration += track.duration_ms / 1000;
+                duration_ms_total += track.duration_ms;
                 entries.push_str(&song_xml(track, album).replacen("<song ", "<entry ", 1));
             }
+            let duration = duration_ms_total / 1000;
             Some(ok_envelope(&format!(
                 "<playlist id=\"{}\" name=\"{}\" songCount=\"{}\" duration=\"{duration}\" \
                  owner=\"melodie\" public=\"false\">{entries}</playlist>",
@@ -982,6 +983,66 @@ mod tests {
         assert!(body2.contains("<entry "), "{body2}");
         assert!(body2.contains("Rhubarb"), "{body2}");
         assert!(body2.contains("Dandelion"), "{body2}");
+
+        handle.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn playlist_duration_sums_milliseconds_before_dividing() {
+        // Verify the bug fix: duration should sum raw milliseconds first,
+        // then divide by 1000, not floor individual track durations before summing.
+        // Two tracks of 1500ms each: sum-then-divide gives 3000/1000=3s,
+        // whereas floor-then-sum would give (1500/1000 + 1500/1000 = 1+1 = 2s).
+        let dir = std::env::temp_dir().join(format!("melodie-duration-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.mp3");
+        let b = dir.join("b.mp3");
+        std::fs::write(&a, vec![0xAAu8; 1000]).unwrap();
+        std::fs::write(&b, vec![0xBBu8; 1000]).unwrap();
+
+        let db = Arc::new(Db::open(std::path::Path::new(":memory:")).unwrap());
+        let mut ids = Vec::new();
+        for (path, artist, album, title, duration_ms) in [
+            (&a, "Artist", "Album", "Track1", 1500i64),
+            (&b, "Artist", "Album", "Track2", 2500i64),
+        ] {
+            ids.push(
+                db.upsert_track(&crate::db::NewTrack {
+                    path: path.to_str().unwrap(),
+                    title,
+                    artist,
+                    album,
+                    track_no: Some(1),
+                    duration_ms,
+                    mtime: 1,
+                    size: std::fs::metadata(path).unwrap().len() as i64,
+                })
+                .unwrap(),
+            );
+        }
+        let pl = db.upsert_playlist("Test", "m3u8", None).unwrap();
+        db.set_playlist_tracks(pl, &ids).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.lan_enabled = true;
+        cfg.lan_bind = "127.0.0.1".to_string();
+        cfg.lan_port = 0;
+        cfg.lan_token = "testtoken".to_string();
+        let handle = spawn(&cfg, db).expect("server starts");
+        let auth = "u=m&p=testtoken&c=test";
+
+        // Total duration: 1500ms + 2500ms = 4000ms = 4 seconds (sum-then-divide).
+        // (Old buggy floor-then-sum would give 1 + 2 = 3 seconds.)
+        let (_s, _h, body) = http_get(handle.addr, &format!("/rest/getPlaylists.view?{auth}"));
+        let body = String::from_utf8_lossy(&body).into_owned();
+        assert!(body.contains("duration=\"4\""), "getPlaylists should report 4s total, got {body}");
+
+        let (_s, _h, body2) =
+            http_get(handle.addr, &format!("/rest/getPlaylist.view?{auth}&id=pl1"));
+        let body2 = String::from_utf8_lossy(&body2).into_owned();
+        assert!(body2.contains("duration=\"4\""), "getPlaylist should report 4s total, got {body2}");
 
         handle.stop();
         let _ = std::fs::remove_dir_all(dir);
