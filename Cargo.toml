@@ -1,0 +1,62 @@
+[package]
+name = "melodie"
+version = "0.1.0"
+edition = "2021"
+description = "A small, private music player that stays out of the way."
+license = "MIT"
+
+[[bin]]
+name = "melodie"
+path = "src/main.rs"
+
+[dependencies]
+# UI: statically-linked FLTK, ~1MB RSS class, retained-mode (zero idle CPU).
+fltk = "1"
+
+# Audio output + gapless queue (wraps cpal). Symphonia decoders enabled per-format.
+rodio = { version = "0.20", default-features = false, features = [
+    "symphonia-mp3",
+    "symphonia-aac",
+    "symphonia-flac",
+    "symphonia-vorbis",
+    "symphonia-wav",
+    "symphonia-isomp4",
+] }
+
+# Tag read/write so downloaded files are self-describing.
+lofty = "0.22"
+
+# SQLite cache, compiled in (bundled) so there is no system dependency.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# OS media keys: MPRIS (Linux) / SMTC / Now Playing in one API.
+souvlaki = "0.7"
+
+# Exportify CSV parsing.
+csv = "1"
+serde = { version = "1", features = ["derive"] }
+# yt-dlp -J output parsing only (spotisync, not the audio hot path).
+serde_json = "1"
+
+# UI thread <-> engine thread command/event channels.
+crossbeam-channel = "0.5"
+
+# config.toml (de)serialization.
+toml = "0.8"
+
+# XDG-ish config/data dir lookup.
+dirs = "5"
+
+anyhow = "1"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+# Deviation from PLAN.md §2 (which specifies "abort"): a decoder library
+# panic (confirmed: rodio 0.20.1's symphonia MP4 backend, see fetch.rs) must
+# be catchable with `std::panic::catch_unwind` around per-track decode, or
+# one bad file takes the whole player down with no recourse. Costs a little
+# binary size for a music player's most basic crash-safety guarantee.
+panic = "unwind"
+strip = true
+opt-level = 3
