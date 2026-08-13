@@ -233,6 +233,10 @@ fn handle(request: Request, cfg: &Config, db: &Db, token: &str) {
         respond_stream(request, db, &query);
         return;
     }
+    if method == "getCoverArt" {
+        respond_cover_art(request, cfg, db, &query);
+        return;
+    }
 
     let body = match method {
         "ping" => ok_envelope(""),
@@ -250,8 +254,6 @@ fn handle(request: Request, cfg: &Config, db: &Db, token: &str) {
         },
     };
     let _ = request.respond(xml_response(body));
-
-    let _ = cfg;
 }
 
 // --------------------------------------------------------------- identity
@@ -702,6 +704,59 @@ fn respond_stream(request: Request, db: &Db, query: &HashMap<String, String>) {
         // error worth shouting about.
         eprintln!("melodie: LAN stream ended early: {e}");
     }
+}
+
+/// Resolves a cover-art id (track, album, or artist) to representative
+/// image bytes.
+///
+/// Tries the file's own embedded picture first (the library is the source
+/// of truth, PLAN.md §3), then falls back to the thumbnail SpotiSync saved
+/// in `covers/`. Downloaded tracks are raw ADTS `.aac`, which has no
+/// container-level metadata slot at all, so for most of a synced library
+/// the fallback *is* the art.
+fn find_cover(cfg: &Config, db: &Db, id: &str) -> Option<(Vec<u8>, &'static str)> {
+    let track = if let Some(track_id) = parse_track_id(id) {
+        db.get_track(track_id).ok().flatten()
+    } else {
+        // An album or artist id: any track under it will do.
+        let groups = group_library(db.list_tracks().unwrap_or_default());
+        groups
+            .iter()
+            .flat_map(|a| &a.albums)
+            .find(|al| al.id == id || al.artist_id == id)
+            .and_then(|al| al.tracks.first().cloned())
+    }?;
+
+    if let Ok(tagged) = lofty::probe::Probe::open(&track.path).and_then(|p| p.read()) {
+        use lofty::file::TaggedFileExt;
+        if let Some(picture) = tagged.primary_tag().and_then(|t| t.pictures().first()) {
+            let mime = match picture.mime_type() {
+                Some(lofty::picture::MimeType::Png) => "image/png",
+                _ => "image/jpeg",
+            };
+            return Some((picture.data().to_vec(), mime));
+        }
+    }
+
+    let video_id = db.cover_video_id_for_track(track.id).ok().flatten()?;
+    let path = cfg.covers_dir().join(format!("{video_id}.jpg"));
+    let bytes = std::fs::read(path).ok()?;
+    Some((bytes, "image/jpeg"))
+}
+
+fn respond_cover_art(request: Request, cfg: &Config, db: &Db, query: &HashMap<String, String>) {
+    let art = query.get("id").and_then(|id| find_cover(cfg, db, id));
+    let response = match art {
+        Some((bytes, mime)) => {
+            let header =
+                Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()).expect("static header");
+            Response::from_data(bytes).with_header(header)
+        }
+        // A real 404 (not an XML error envelope) is what clients expect for
+        // a missing image — they show their own placeholder.
+        None => Response::from_data(Vec::new()).with_status_code(StatusCode(404)),
+    };
+    let _ = request.respond(response);
 }
 
 #[cfg(test)]
@@ -1227,6 +1282,24 @@ mod tests {
         // scrobble is accepted and does nothing.
         let (_s, _h, body) = http_get(handle.addr, &format!("/rest/scrobble.view?{auth}&id=tr1"));
         assert!(String::from_utf8_lossy(&body).contains("status=\"ok\""));
+
+        handle.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cover_art_falls_back_to_the_spotisync_thumbnail_and_404s_otherwise() {
+        let (handle, dir) = seeded_server();
+        let auth = "u=m&p=testtoken&c=test";
+
+        // The seeded tracks are raw bytes with no embedded picture and no
+        // spotisync provenance, so there is genuinely no art to serve.
+        let (status, _h, _b) = http_get(handle.addr, &format!("/rest/getCoverArt.view?{auth}&id=tr1"));
+        assert!(status.contains("404"), "no art available should 404: {status}");
+
+        let (status, _h, _b) =
+            http_get(handle.addr, &format!("/rest/getCoverArt.view?{auth}&id=trnope"));
+        assert!(status.contains("404"), "{status}");
 
         handle.stop();
         let _ = std::fs::remove_dir_all(dir);
