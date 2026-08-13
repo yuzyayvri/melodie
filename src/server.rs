@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
-use tiny_http::{Header, Request, Response, Server};
+use tiny_http::{Header, Request, Response, Server, StatusCode};
 
 use crate::config::Config;
 use crate::db::Db;
@@ -229,9 +229,18 @@ fn handle(request: Request, cfg: &Config, db: &Db, token: &str) {
     }
 
     let method = method_of(&url);
+    if method == "stream" || method == "download" {
+        respond_stream(request, db, &query);
+        return;
+    }
+
     let body = match method {
         "ping" => ok_envelope(""),
         "getLicense" => ok_envelope("<license valid=\"true\"/>"),
+        // Accepted and discarded: Melodie keeps no play counts (PLAN.md §7
+        // lists scrobble as a no-op), but a client that gets an error here
+        // may show it to the user after every song.
+        "scrobble" => ok_envelope(""),
         _ => match handle_browse(method, &query, db).or_else(|| handle_playlists(method, &query, db)) {
             Some(body) => body,
             // A `None` from a handler it *does* own means the id was bad;
@@ -580,6 +589,118 @@ fn handle_browse(method: &str, query: &HashMap<String, String>, db: &Db) -> Opti
         }
 
         _ => None,
+    }
+}
+
+/// Parses a single-range `Range:` header value against a known file length.
+/// Multi-range requests (`bytes=0-10,20-30`) are not supported — no audio
+/// client sends them — and fall back to a full-body 200.
+pub fn parse_range(value: &str, len: u64) -> Option<(u64, u64)> {
+    if len == 0 {
+        return None;
+    }
+    let spec = value.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (from, to) = spec.split_once('-')?;
+    let (start, end) = if from.is_empty() {
+        // "-N" = the last N bytes.
+        let n: u64 = to.trim().parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        (len.saturating_sub(n), len - 1)
+    } else {
+        let start: u64 = from.trim().parse().ok()?;
+        let end = match to.trim() {
+            "" => len - 1,
+            other => other.parse().ok()?,
+        };
+        (start, end.min(len - 1))
+    };
+    if start > end || start >= len {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// Streams a track's bytes, honouring `Range`.
+///
+/// PLAN.md §6 ("nothing loads whole"): this seeks and hands tiny_http a
+/// `Take<File>`, so serving a 40-minute FLAC costs the same memory as
+/// serving a 2-minute MP3.
+fn respond_stream(request: Request, db: &Db, query: &HashMap<String, String>) {
+    let track = query
+        .get("id")
+        .and_then(|id| parse_track_id(id))
+        .and_then(|id| db.get_track(id).ok().flatten());
+    let Some(track) = track else {
+        let _ = request.respond(xml_response(error_envelope(70, "Requested data was not found")));
+        return;
+    };
+
+    let file = match std::fs::File::open(&track.path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("melodie: LAN server cannot open {}: {e}", track.path);
+            let _ = request.respond(xml_response(error_envelope(70, "File not found")));
+            return;
+        }
+    };
+    let len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => 0,
+    };
+
+    let content_type = content_type_for(&extension_of(&track.path));
+    let range = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Range"))
+        .and_then(|h| parse_range(h.value.as_str(), len));
+
+    let mut headers = vec![
+        Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes()).expect("static header"),
+        Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).expect("static header"),
+    ];
+
+    let result = match range {
+        Some((start, end)) => {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = file;
+            if file.seek(SeekFrom::Start(start)).is_err() {
+                let _ = request.respond(xml_response(error_envelope(0, "Seek failed")));
+                return;
+            }
+            let count = end - start + 1;
+            headers.push(
+                Header::from_bytes(
+                    &b"Content-Range"[..],
+                    format!("bytes {start}-{end}/{len}").as_bytes(),
+                )
+                .expect("formatted header"),
+            );
+            request.respond(Response::new(
+                StatusCode(206),
+                headers,
+                file.take(count),
+                Some(count as usize),
+                None,
+            ))
+        }
+        None => request.respond(Response::new(
+            StatusCode(200),
+            headers,
+            file,
+            Some(len as usize),
+            None,
+        )),
+    };
+    if let Err(e) = result {
+        // A phone that walked out of Wi-Fi range mid-song is normal, not an
+        // error worth shouting about.
+        eprintln!("melodie: LAN stream ended early: {e}");
     }
 }
 
@@ -1043,6 +1164,61 @@ mod tests {
             http_get(handle.addr, &format!("/rest/getPlaylist.view?{auth}&id=pl1"));
         let body2 = String::from_utf8_lossy(&body2).into_owned();
         assert!(body2.contains("duration=\"4\""), "getPlaylist should report 4s total, got {body2}");
+
+        handle.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parse_range_handles_the_forms_clients_actually_send() {
+        assert_eq!(parse_range("bytes=0-99", 1000), Some((0, 99)));
+        assert_eq!(parse_range("bytes=500-", 1000), Some((500, 999)));
+        // Suffix range: "the last 200 bytes".
+        assert_eq!(parse_range("bytes=-200", 1000), Some((800, 999)));
+        // Past the end is clamped, not an error.
+        assert_eq!(parse_range("bytes=0-99999", 1000), Some((0, 999)));
+        // Unsatisfiable or nonsense -> None, caller falls back to a 200.
+        assert_eq!(parse_range("bytes=1000-1005", 1000), None);
+        assert_eq!(parse_range("bytes=500-100", 1000), None);
+        assert_eq!(parse_range("items=0-10", 1000), None);
+        assert_eq!(parse_range("garbage", 1000), None);
+        assert_eq!(parse_range("bytes=0-10", 0), None, "empty file has no satisfiable range");
+    }
+
+    #[test]
+    fn stream_serves_whole_files_and_byte_ranges() {
+        let (handle, dir) = seeded_server();
+        let auth = "u=m&p=testtoken&c=test";
+
+        let (status, headers, body) =
+            http_get(handle.addr, &format!("/rest/stream.view?{auth}&id=tr1"));
+        assert!(status.contains("200"), "{status}");
+        assert_eq!(body.len(), 5000, "whole file");
+        assert!(body.iter().all(|b| *b == 0xAA));
+        assert!(headers.contains("Accept-Ranges: bytes"), "{headers}");
+        assert!(headers.to_lowercase().contains("audio/mpeg"), "{headers}");
+
+        let (status, headers, body) = http_get_with(
+            handle.addr,
+            &format!("/rest/stream.view?{auth}&id=tr1"),
+            &[("Range", "bytes=100-199")],
+        );
+        assert!(status.contains("206"), "partial content: {status}");
+        assert_eq!(body.len(), 100);
+        assert!(headers.contains("Content-Range: bytes 100-199/5000"), "{headers}");
+
+        // `download` is the same bytes; offline-capable clients use it.
+        let (status, _h, body) = http_get(handle.addr, &format!("/rest/download.view?{auth}&id=tr2"));
+        assert!(status.contains("200"), "{status}");
+        assert_eq!(body.len(), 4000);
+
+        // A bad id is a Subsonic error, not a panic or a hang.
+        let (_s, _h, body) = http_get(handle.addr, &format!("/rest/stream.view?{auth}&id=tr999"));
+        assert!(String::from_utf8_lossy(&body).contains("status=\"failed\""));
+
+        // scrobble is accepted and does nothing.
+        let (_s, _h, body) = http_get(handle.addr, &format!("/rest/scrobble.view?{auth}&id=tr1"));
+        assert!(String::from_utf8_lossy(&body).contains("status=\"ok\""));
 
         handle.stop();
         let _ = std::fs::remove_dir_all(dir);
