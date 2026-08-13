@@ -1868,21 +1868,17 @@ Append to `src/server.rs`, above the test module:
 /// container-level metadata slot at all, so for most of a synced library
 /// the fallback *is* the art.
 fn find_cover(cfg: &Config, db: &Db, id: &str) -> Option<(Vec<u8>, &'static str)> {
-    let candidates: Vec<crate::db::Track> = if let Some(track_id) = parse_track_id(id) {
-        db.get_track(track_id).ok().flatten().into_iter().collect()
+    let track = if let Some(track_id) = parse_track_id(id) {
+        db.get_track(track_id).ok().flatten()
     } else {
-        // An album or artist id: any of its tracks will do.
+        // An album or artist id: any track under it will do.
         let groups = group_library(db.list_tracks().unwrap_or_default());
         groups
             .iter()
-            .filter(|a| a.id == id)
-            .flat_map(|a| a.albums.iter())
-            .chain(groups.iter().flat_map(|a| a.albums.iter()).filter(|al| al.id == id))
-            .flat_map(|al| al.tracks.iter().cloned())
-            .take(1)
-            .collect()
-    };
-    let track = candidates.into_iter().next()?;
+            .flat_map(|a| &a.albums)
+            .find(|al| al.id == id || al.artist_id == id)
+            .and_then(|al| al.tracks.first().cloned())
+    }?;
 
     if let Ok(tagged) = lofty::probe::Probe::open(&track.path).and_then(|p| p.read()) {
         use lofty::file::TaggedFileExt;
