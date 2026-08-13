@@ -707,6 +707,14 @@ fn respond_stream(request: Request, db: &Db, query: &HashMap<String, String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_test_dir(prefix: &str) -> std::path::PathBuf {
+        let n = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()))
+    }
 
     #[test]
     fn escape_xml_covers_all_five_entities() {
@@ -961,7 +969,7 @@ mod tests {
     /// A DB with two real tracks. Returns the temp dir so the caller keeps it
     /// alive — dropping it deletes the files.
     fn seeded_server() -> (ServerHandle, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("melodie-server-test-{}", std::process::id()));
+        let dir = unique_test_dir("melodie-server-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // Real bytes on disk so `stream` has something to serve.
@@ -1040,7 +1048,7 @@ mod tests {
 
     /// Same library as `seeded_server`, plus a playlist holding both tracks.
     fn seeded_server_with_playlist() -> (ServerHandle, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("melodie-pl-test-{}", std::process::id()));
+        let dir = unique_test_dir("melodie-pl-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.mp3");
@@ -1115,7 +1123,7 @@ mod tests {
         // then divide by 1000, not floor individual track durations before summing.
         // Two tracks of 1500ms each: sum-then-divide gives 3000/1000=3s,
         // whereas floor-then-sum would give (1500/1000 + 1500/1000 = 1+1 = 2s).
-        let dir = std::env::temp_dir().join(format!("melodie-duration-test-{}", std::process::id()));
+        let dir = unique_test_dir("melodie-duration-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.mp3");
