@@ -292,6 +292,28 @@ impl Db {
         .map_err(Into::into)
     }
 
+    /// The YouTube id a track was downloaded from, if SpotiSync fetched it —
+    /// which is where `covers/<id>.jpg` gets its name.
+    ///
+    /// Joined on tags rather than path for the same reason
+    /// `get_track_id_by_tags` exists: the on-disk extension isn't stable
+    /// (PLAN.md §5.5's format fallback, plus the ADTS remux).
+    pub fn cover_video_id_for_track(&self, track_id: i64) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT m.youtube_id
+               FROM tracks t
+               JOIN spotify_tracks s
+                 ON s.title = t.title AND s.artist = t.artist AND s.album = t.album
+               JOIN matches m ON m.spotify_uri = s.uri
+              WHERE t.id = ?1 AND m.youtube_id IS NOT NULL
+              LIMIT 1",
+            params![track_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
 
     // ------------------------------------------------------------- playlists
 
@@ -678,5 +700,42 @@ mod tests {
         // The surviving "a" job is the original one, not a copy.
         let survivor = db.next_pending_job().unwrap().unwrap();
         assert_eq!(survivor.id, first);
+    }
+
+    #[test]
+    fn cover_video_id_resolves_through_the_spotisync_match() {
+        let db = Db::open(Path::new(":memory:")).unwrap();
+        let track_id = db
+            .upsert_track(&NewTrack {
+                path: "/music/Artist/Album/Song.aac",
+                title: "Song",
+                artist: "Artist",
+                album: "Album",
+                track_no: Some(1),
+                duration_ms: 1000,
+                mtime: 1,
+                size: 100,
+            })
+            .unwrap();
+
+        // No spotisync provenance yet.
+        assert_eq!(db.cover_video_id_for_track(track_id).unwrap(), None);
+
+        db.upsert_spotify_track(&SpotifyTrackRow {
+            uri: "spotify:track:abc".to_string(),
+            title: "Song".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            duration_ms: 1000,
+            isrc: None,
+        })
+        .unwrap();
+        db.upsert_match("spotify:track:abc", Some("vid123"), Some(90.0), true).unwrap();
+
+        assert_eq!(
+            db.cover_video_id_for_track(track_id).unwrap(),
+            Some("vid123".to_string())
+        );
+        assert_eq!(db.cover_video_id_for_track(9999).unwrap(), None);
     }
 }
