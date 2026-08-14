@@ -49,6 +49,11 @@ object Sync {
                 // Re-syncing a playlist must not duplicate rows.
                 existing.removeAll { it.id == song.id && it.playlist == playlistName }
                 existing.add(entry)
+                // Flush after every track, not just at the end: if the app
+                // dies mid-playlist, tracks already downloaded to disk must
+                // still show up as playable rather than sitting orphaned
+                // until a full resync self-heals them.
+                LocalLibrary.save(filesDir, existing)
             }
 
             // Tracks dropped from the playlist upstream lose their manifest

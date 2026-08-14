@@ -29,6 +29,11 @@ class LibraryActivity : Activity() {
     private var openPlaylist: RemotePlaylist? = null
     private var songs: List<RemoteSong> = emptyList()
 
+    // Checked/set only on the main thread (startSync only ever runs from a
+    // button click), so a plain Boolean is enough to stop a double-tap or a
+    // second playlist's Sync button from racing library.tsv with this one.
+    private var syncInFlight = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val paired = Pairing.load(this)
@@ -145,8 +150,13 @@ class LibraryActivity : Activity() {
     }
 
     private fun startSync(playlist: RemotePlaylist) {
+        if (syncInFlight) {
+            Toast.makeText(this, "Sync already in progress", Toast.LENGTH_SHORT).show()
+            return
+        }
         val queued = songs
         if (queued.isEmpty()) return
+        syncInFlight = true
         status.text = "Syncing ${playlist.name}…"
         Sync.playlist(
             filesDir = filesDir,
@@ -158,6 +168,7 @@ class LibraryActivity : Activity() {
             },
             onDone = { synced, failed ->
                 main.post {
+                    syncInFlight = false
                     status.text = if (failed == 0) {
                         "${playlist.name}: $synced tracks on this phone"
                     } else {
