@@ -1,10 +1,10 @@
 # Melodie
 
 A small, private music player. See `PLAN.md` for the full technical plan.
-This build implements **Phases 0–3**: library scan, playback, MPRIS/tray-less
-background playback, `.m3u8` playlists, and SpotiSync's Exportify-CSV path.
-Phases 4–7 (LAN/Subsonic server, Android companion, live librespot sync,
-CI hardening) are not implemented.
+This build implements **Phases 0–4**: library scan, playback, MPRIS/tray-less
+background playback, `.m3u8` playlists, SpotiSync's Exportify-CSV path, and a
+read-only LAN/Subsonic server with QR pairing. Phases 5–7 (Android companion,
+live librespot sync, CI hardening) are not implemented.
 
 ## Building
 
@@ -25,6 +25,7 @@ same way and compile faster.
 ```sh
 melodie              # opens the player window
 melodie --rescan     # scans the library and prints it, no window
+melodie --pair       # prints this machine's LAN host/port/token, no window
 melodie --help
 ```
 
@@ -87,6 +88,12 @@ window, `Quit` exits for real.
   queue (`match` then `download`), the scoring table from PLAN.md §5.4,
   a serialized `yt-dlp` fetcher that tags+embeds art via `lofty` and moves
   the file into the library, and a Review window for the 40–75 score band.
+- **Phase 4** — a read-only OpenSubsonic-compatible LAN server (`tiny_http`,
+  two fixed worker threads, no async runtime), token auth, browse/playlist/
+  stream/cover-art endpoints over the existing DB cache, and phone pairing:
+  a **Pair** button (and headless `melodie --pair`) that shows the host,
+  port and token as both text and a QR code. mDNS advertisement was
+  deliberately skipped — see Deviations below.
 
 Verified against a real `yt-dlp`/`ffmpeg`/audio-device environment during
 development: CSV → search → score → auto-accept → download → tag → library
@@ -142,6 +149,12 @@ working against `playerctl`/`dbus-send`.
   a personal library, but on a very large library it could push cold start
   past the ≤150ms target in PLAN.md §6. Worth moving to a background thread
   if that turns out to matter.
+- **mDNS advertisement (PLAN.md §8) is not implemented** — QR pairing
+  already carries host, port and token, so LAN discovery buys nothing for a
+  single-user pairing flow and costs a dependency plus periodic background
+  chatter against the §6 CPU budget.
+- **`getLicense` and `getMusicFolders` are served although PLAN.md §7's
+  list omits them**: real clients refuse to proceed without them.
 
 ## Resource budget
 
@@ -149,11 +162,12 @@ Full measurement (RSS, CPU, cold start) is Phase 7's `make bench` tooling
 and isn't built yet. `cargo build --release` does use the `lto = "fat"`,
 `codegen-units = 1`, `panic = "abort"`, `strip = true` profile from
 PLAN.md §2, which is most of the win. One number gathered by hand on this
-build: **stripped binary is ~6.9 MB** — over the ≤6 MB target in PLAN.md §6
-but under the 10 MB hard ceiling. `rusqlite` (bundled SQLite), FLTK, the
-Symphonia decoders, and `souvlaki`'s `dbus` backend are the main
-contributors; trimming would mean profiling which of those actually
-matters, which is exactly what Phase 7 is for.
+build: **stripped binary is ~7.6 MB** (was ~6.9 MB pre-Phase-4; `tiny_http`,
+`md5`, `fastrand` and `qrcode` for the LAN server cost ~0.7 MB) — over the
+≤6 MB target in PLAN.md §6 but under the 10 MB hard ceiling. `rusqlite`
+(bundled SQLite), FLTK, the Symphonia decoders, and `souvlaki`'s `dbus`
+backend are the main contributors; trimming would mean profiling which of
+those actually matters, which is exactly what Phase 7 is for.
 
 ## Tests
 
