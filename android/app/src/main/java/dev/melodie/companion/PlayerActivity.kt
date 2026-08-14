@@ -88,7 +88,13 @@ class PlayerActivity : Activity() {
         val future = MediaController.Builder(this, token).buildAsync()
         controllerFuture = future
         future.addListener({
-            val c = future.get()
+            val c = try {
+                future.get()
+            } catch (e: java.util.concurrent.CancellationException) {
+                return@addListener
+            } catch (e: java.util.concurrent.ExecutionException) {
+                return@addListener
+            }
             controller = c
             val queue = Queue.pending
             if (queue.isNotEmpty()) {
