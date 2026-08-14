@@ -29,11 +29,6 @@ class LibraryActivity : Activity() {
     private var openPlaylist: RemotePlaylist? = null
     private var songs: List<RemoteSong> = emptyList()
 
-    // Checked/set only on the main thread (startSync only ever runs from a
-    // button click), so a plain Boolean is enough to stop a double-tap or a
-    // second playlist's Sync button from racing library.tsv with this one.
-    private var syncInFlight = false
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val paired = Pairing.load(this)
@@ -75,13 +70,53 @@ class LibraryActivity : Activity() {
             val result = runCatching { client.playlists() }
             main.post {
                 result.onSuccess {
+                    repairButtonView?.let { root.removeView(it) }
+                    repairButtonView = null
                     playlists = it
                     showPlaylists()
                 }.onFailure { e ->
-                    status.text = "Can't reach Melodie: ${e.message}"
+                    showOfflineFallback(e)
                 }
             }
         }.start()
+    }
+
+    /**
+     * The core offline-first requirement: a server that's unreachable (no
+     * Wi-Fi, rotated LAN IP, desktop off) must not strand tracks that are
+     * already synced to this phone. Falls back to whatever LocalLibrary
+     * already has, synthesizing playlist entries with an empty id — an
+     * empty id is how the rest of this screen recognizes "this came from
+     * the phone, not the server" and skips network calls for it.
+     */
+    private fun showOfflineFallback(e: Throwable) {
+        val local = LocalLibrary.load(filesDir)
+        if (local.isEmpty()) {
+            status.text = "Can't reach Melodie: ${e.message}"
+            showRepairButton()
+            return
+        }
+        val names = local.map { it.playlist }.distinct()
+        playlists = names.map { name ->
+            RemotePlaylist(id = "", name = name, songCount = local.count { it.playlist == name })
+        }
+        showPlaylists()
+        status.text = "Offline — showing what's on this phone."
+        showRepairButton()
+    }
+
+    private var repairButtonView: android.widget.Button? = null
+
+    /** Only reachable from the failure path — forgetting pairing otherwise requires clearing app data. */
+    private fun showRepairButton() {
+        if (repairButtonView != null) return
+        val button = Ui.button(this, "Re-pair with a different server") {
+            Pairing.clear(this)
+            startActivity(Intent(this, PairActivity::class.java))
+            finish()
+        }
+        repairButtonView = button
+        root.addView(button)
     }
 
     private fun showPlaylists() {
@@ -101,6 +136,15 @@ class LibraryActivity : Activity() {
 
     private fun openPlaylist(playlist: RemotePlaylist) {
         openPlaylist = playlist
+        // Empty id marks an offline-synthesized playlist (see
+        // showOfflineFallback) — nothing to fetch, build the track list
+        // straight from what's already on the phone.
+        if (playlist.id.isEmpty()) {
+            val local = LocalLibrary.load(filesDir).filter { it.playlist == playlist.name }
+            songs = local.map { RemoteSong(it.id, it.title, it.artist, it.album, it.durationSec, "") }
+            showSongs(playlist)
+            return
+        }
         status.text = "Loading ${playlist.name}…"
         Thread {
             val result = runCatching { client.playlist(playlist.id) }
@@ -135,7 +179,14 @@ class LibraryActivity : Activity() {
                 startPlayback(ordered, if (start < 0) 0 else start)
             }
         }
-        syncButton(playlist)
+        // No RemotePlaylist.id to sync against for an offline entry — there's
+        // nothing a Sync button could do here that hasn't already happened.
+        if (playlist.id.isEmpty()) {
+            syncButtonView?.let { root.removeView(it) }
+            syncButtonView = null
+        } else {
+            syncButton(playlist)
+        }
     }
 
     private var syncButtonView: android.widget.Button? = null
@@ -150,15 +201,10 @@ class LibraryActivity : Activity() {
     }
 
     private fun startSync(playlist: RemotePlaylist) {
-        if (syncInFlight) {
-            Toast.makeText(this, "Sync already in progress", Toast.LENGTH_SHORT).show()
-            return
-        }
         val queued = songs
         if (queued.isEmpty()) return
-        syncInFlight = true
         status.text = "Syncing ${playlist.name}…"
-        Sync.playlist(
+        val started = Sync.playlist(
             filesDir = filesDir,
             client = client,
             playlistName = playlist.name,
@@ -168,7 +214,6 @@ class LibraryActivity : Activity() {
             },
             onDone = { synced, failed ->
                 main.post {
-                    syncInFlight = false
                     status.text = if (failed == 0) {
                         "${playlist.name}: $synced tracks on this phone"
                     } else {
@@ -178,6 +223,9 @@ class LibraryActivity : Activity() {
                 }
             },
         )
+        if (!started) {
+            Toast.makeText(this, "Sync already in progress", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun startPlayback(queue: List<LocalSong>, index: Int) {
