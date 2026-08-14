@@ -14,6 +14,8 @@ use crate::db::{Db, Playlist, Track};
 use crate::engine::{self, Command, EngineEvent, LoopMode, QueueTrack};
 use crate::library;
 use crate::mediakeys;
+#[cfg(feature = "lan")]
+use crate::net;
 use crate::playlist;
 use crate::spotisync::{self, WorkerCommand, WorkerEvent};
 use crate::ui::{self, list::Row};
@@ -194,6 +196,56 @@ pub fn run(cfg: Config, db: Db) -> ExitCode {
         msg_tx.send(Message::Worker(ev));
     });
     let _ = worker_tx.send(WorkerCommand::SyncInbox);
+
+    // LAN server (PLAN.md §7 Tier 0). Held for the process lifetime; the
+    // handle is only needed to stop it, and the process exiting does that.
+    #[cfg(feature = "lan")]
+    let _lan = {
+        let mut cfg = cfg.clone();
+        if cfg.lan_enabled {
+            if cfg.ensure_lan_token() {
+                if let Err(e) = cfg.save() {
+                    eprintln!("melodie: could not save the generated LAN token: {e:#}");
+                }
+            }
+            match crate::server::spawn(&cfg, db.clone()) {
+                Ok(handle) => {
+                    eprintln!("melodie: LAN server listening on http://{}", handle.addr);
+                    Some(handle)
+                }
+                Err(e) => {
+                    // Never fatal: a music player that refuses to start
+                    // because a socket is busy is a broken music player.
+                    eprintln!("melodie: LAN server disabled: {e:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
+    #[cfg(feature = "lan")]
+    {
+        let cfg_for_pair = cfg.clone();
+        win.pair_btn.set_callback(move |_| {
+            let mut cfg = cfg_for_pair.clone();
+            if !cfg.lan_enabled {
+                eprintln!(
+                    "melodie: set `lan_enabled = true` in {} and restart to pair a phone",
+                    Config::config_path().display()
+                );
+                return;
+            }
+            if cfg.ensure_lan_token() {
+                let _ = cfg.save();
+            }
+            let host = net::detect_lan_ip().unwrap_or(std::net::IpAddr::V4(
+                std::net::Ipv4Addr::LOCALHOST,
+            ));
+            ui::pair::show(&ui::pair::pairing_url(&host, cfg.lan_port, &cfg.lan_token));
+        });
+    }
 
     // Restore last track, paused, at its last position — never autoplay on
     // launch, that would be a surprising thing for a music player to do.

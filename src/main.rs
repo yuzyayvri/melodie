@@ -20,14 +20,16 @@ use db::Db;
 fn print_usage() {
     eprintln!(
         "melodie\n\n\
-         Usage: melodie [--rescan] [--repair-audio] [--help]\n\n\
+         Usage: melodie [--rescan] [--repair-audio] [--pair] [--help]\n\n\
          With no flags, opens the player window.\n\
          --rescan        scan the library and print it (no window).\n\
          --repair-audio  remux any .m4a/.mp4/.m4b library files to .aac\n\
          \x20               in place and update playlists (no window). One-\n\
          \x20               time fix for tracks downloaded before the MP4\n\
          \x20               decode crash (see README) was fixed; safe to run\n\
-         \x20               any time, a no-op once nothing needs it."
+         \x20               any time, a no-op once nothing needs it.\n\
+         --pair          print this machine's LAN host/port/token for the\n\
+         \x20               Android companion app (no window)."
     );
 }
 
@@ -35,6 +37,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rescan_only = args.iter().any(|a| a == "--rescan");
     let repair_audio = args.iter().any(|a| a == "--repair-audio");
+    let pair_only = args.iter().any(|a| a == "--pair");
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_usage();
         return ExitCode::SUCCESS;
@@ -65,6 +68,35 @@ fn main() -> ExitCode {
     }
     if repair_audio {
         return run_repair_audio(&cfg, &db);
+    }
+    #[cfg(feature = "lan")]
+    if pair_only {
+        let mut cfg = cfg;
+        if cfg.ensure_lan_token() {
+            if let Err(e) = cfg.save() {
+                eprintln!("melodie: could not save the generated LAN token: {e:#}");
+                return ExitCode::FAILURE;
+            }
+        }
+        let host = net::detect_lan_ip()
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        println!("Host:  {host}");
+        println!("Port:  {}", cfg.lan_port);
+        println!("Token: {}", cfg.lan_token);
+        println!("URL:   melodie://{host}:{}/{}", cfg.lan_port, cfg.lan_token);
+        if !cfg.lan_enabled {
+            println!(
+                "\nNote: `lan_enabled` is false in {}. Set it to true and restart \
+                 melodie before pairing.",
+                Config::config_path().display()
+            );
+        }
+        return ExitCode::SUCCESS;
+    }
+    #[cfg(not(feature = "lan"))]
+    if pair_only {
+        eprintln!("melodie: built without the `lan` feature");
+        return ExitCode::FAILURE;
     }
 
     app::run(cfg, db)
