@@ -153,6 +153,13 @@ class SubsonicClient(val server: Server) {
             if (connection.responseCode != 200) {
                 throw SubsonicException(connection.responseCode, "download failed for $songId")
             }
+            // tiny_http's error path (src/server.rs on the desktop) answers
+            // a bad id or missing file with HTTP 200 and an XML error
+            // envelope, not a non-200 status — catch that here so it never
+            // gets written to disk and mistaken for real audio.
+            if (connection.contentType?.startsWith("text/xml") == true) {
+                throw SubsonicException(0, "server returned an error for $songId")
+            }
             connection.inputStream.use { input ->
                 FileOutputStream(partial).use { output ->
                     val buffer = ByteArray(64 * 1024)
