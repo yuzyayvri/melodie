@@ -13,6 +13,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.google.common.util.concurrent.ListenableFuture
 
 /** Handoff from the library screen; cleared as soon as it is consumed. */
 object Queue {
@@ -27,6 +28,8 @@ class PlayerActivity : Activity() {
 
     private val main = Handler(Looper.getMainLooper())
     private var controller: MediaController? = null
+    private var controllerFuture: ListenableFuture<MediaController>? = null
+    private var startIndex = 0
     private lateinit var nowPlaying: TextView
     private lateinit var position: TextView
     private lateinit var seek: SeekBar
@@ -72,12 +75,18 @@ class PlayerActivity : Activity() {
             }
         })
 
-        connect(intent.getIntExtra(EXTRA_INDEX, 0))
+        startIndex = intent.getIntExtra(EXTRA_INDEX, 0)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (controller == null) connect(startIndex)
     }
 
     private fun connect(startIndex: Int) {
         val token = SessionToken(this, ComponentName(this, PlaybackService::class.java))
         val future = MediaController.Builder(this, token).buildAsync()
+        controllerFuture = future
         future.addListener({
             val c = future.get()
             controller = c
@@ -117,6 +126,10 @@ class PlayerActivity : Activity() {
     override fun onStop() {
         super.onStop()
         main.removeCallbacks(tick)
+        controllerFuture?.let { MediaController.releaseFuture(it) }
+        controller?.release()
+        controller = null
+        controllerFuture = null
     }
 
     override fun onDestroy() {
