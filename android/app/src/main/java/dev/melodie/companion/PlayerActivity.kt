@@ -88,6 +88,16 @@ class PlayerActivity : Activity() {
         val future = MediaController.Builder(this, token).buildAsync()
         controllerFuture = future
         future.addListener({
+            if (controllerFuture !== future) {
+                // A newer connect() (or onStop's cleanup) has already
+                // superseded this attempt — back out without touching any
+                // state. Otherwise a future that completes right as onStop
+                // synchronously releases it via the "already done" branch
+                // of releaseFuture() would still stash the now-dead
+                // controller here and restart the position tick with
+                // nothing left to ever stop it.
+                return@addListener
+            }
             val c = try {
                 future.get()
             } catch (e: java.util.concurrent.CancellationException) {
