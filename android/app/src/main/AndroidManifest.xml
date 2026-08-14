@@ -23,5 +23,9 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".LibraryActivity"
+            android:exported="false" />
+
     </application>
 </manifest>
