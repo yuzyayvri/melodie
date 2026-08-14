@@ -1,4 +1,6 @@
 pub mod list;
+#[cfg(feature = "lan")]
+pub mod pair;
 pub mod review;
 pub mod theme;
 
@@ -23,6 +25,8 @@ pub struct MainWindow {
     pub playlist_choice: Choice,
     pub sync_btn: Button,
     pub review_btn: Button,
+    #[cfg(feature = "lan")]
+    pub pair_btn: Button,
     pub prev_btn: Button,
     pub play_btn: Button,
     pub next_btn: Button,
@@ -63,7 +67,11 @@ pub fn build() -> MainWindow {
     let choice_w = 140;
     let sync_w = 50;
     let review_w = 64;
-    let cluster_w = sync_w + 4 + review_w + 4 + choice_w;
+    #[cfg(feature = "lan")]
+    let pair_w = 46;
+    #[cfg(not(feature = "lan"))]
+    let pair_w = 0;
+    let cluster_w = pair_w + sync_w + 4 + review_w + 4 + choice_w + if pair_w > 0 { 4 } else { 0 };
 
     let mut playlist_choice = Choice::new(WIN_W - choice_w - PAD, 6, choice_w, 24, None);
     playlist_choice.set_color(theme::BG);
@@ -72,12 +80,29 @@ pub fn build() -> MainWindow {
 
     let mut review_btn = Button::new(WIN_W - choice_w - review_w - PAD - 4, 6, review_w, 24, "Review");
     let mut sync_btn = Button::new(WIN_W - choice_w - review_w - sync_w - PAD - 8, 6, sync_w, 24, "Sync");
+    #[cfg(feature = "lan")]
+    let mut pair_btn = Button::new(
+        WIN_W - choice_w - review_w - sync_w - pair_w - PAD - 12,
+        6,
+        pair_w,
+        24,
+        "Pair",
+    );
+
     for b in [&mut sync_btn, &mut review_btn] {
         b.set_color(theme::BG);
         b.set_label_color(theme::FG);
         b.set_label_size(theme::FONT_SIZE - 1);
         b.set_frame(theme::BUTTON_FRAME);
         add_hover(b, theme::BG, theme::BTN_HOVER);
+    }
+    #[cfg(feature = "lan")]
+    {
+        pair_btn.set_color(theme::BG);
+        pair_btn.set_label_color(theme::FG);
+        pair_btn.set_label_size(theme::FONT_SIZE - 1);
+        pair_btn.set_frame(theme::BUTTON_FRAME);
+        add_hover(&mut pair_btn, theme::BG, theme::BTN_HOVER);
     }
 
     let mut now_playing = Frame::new(PAD, 6, WIN_W - PAD * 3 - cluster_w, 24, None);
@@ -137,6 +162,8 @@ pub fn build() -> MainWindow {
         playlist_choice,
         sync_btn,
         review_btn,
+        #[cfg(feature = "lan")]
+        pair_btn,
         prev_btn,
         play_btn,
         next_btn,
