@@ -4,6 +4,7 @@ mod db;
 mod engine;
 mod library;
 mod mediakeys;
+#[cfg(feature = "lan")]
 mod net;
 mod playlist;
 #[cfg(feature = "lan")]

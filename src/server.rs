@@ -89,7 +89,12 @@ pub fn method_of(url: &str) -> &str {
 }
 
 fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    // `hex` comes from a percent-decoded query string, which can contain
+    // arbitrary multi-byte UTF-8. Reject non-ASCII up front so the
+    // byte-offset slicing below can never land inside a multi-byte
+    // character and panic ("byte index is not a char boundary") — this
+    // path runs before any auth check, so it's reachable pre-auth.
+    if !hex.is_ascii() || hex.len() % 2 != 0 {
         return None;
     }
     (0..hex.len())
@@ -150,6 +155,13 @@ pub fn error_envelope(code: u32, message: &str) -> String {
 }
 
 /// A running server. Dropping this does not stop it; call `stop()`.
+///
+/// `stop()` (and the fields it reads) is only ever called from tests —
+/// production relies on process exit to tear the server down (see
+/// `app::run`'s `_lan` binding) — so a normal `cargo build` sees it as dead
+/// code without this, the same convention `db.rs`'s row structs use for
+/// fields nothing reads yet.
+#[allow(dead_code)]
 pub struct ServerHandle {
     /// The address actually bound — with `lan_port = 0` this is the
     /// OS-assigned port, which is what tests need.
@@ -159,6 +171,7 @@ pub struct ServerHandle {
 }
 
 impl ServerHandle {
+    #[allow(dead_code)]
     pub fn stop(self) {
         // unblock() wakes only one recv()-blocked thread per call (see its
         // docs) — call it once per worker thread so all of them exit.
@@ -173,10 +186,13 @@ impl ServerHandle {
 
 /// Number of request-serving threads.
 ///
-/// ponytail: fixed at 2, not a pool. One long `stream` response must not
-/// block a concurrent `getCoverArt`, and this is a single-user LAN server —
-/// raise it only if real concurrent clients ever appear.
-const WORKER_THREADS: usize = 2;
+/// ponytail: fixed pool, not dynamic. `stream`/`download` pin a worker for
+/// the entire duration of an audio transfer (potentially minutes), so this
+/// needs to be large enough that one client streaming (or prefetching the
+/// next track while the current one plays) doesn't starve every other
+/// request — browsing, cover art — behind it. Still a single-user LAN
+/// server; raise further only if real concurrent clients need it.
+const WORKER_THREADS: usize = 6;
 
 /// Binds and starts serving. Binding happens synchronously so a bad address
 /// or a taken port is reported to the caller instead of vanishing into a
@@ -199,9 +215,17 @@ pub fn spawn(cfg: &Config, db: Arc<Db>) -> Result<ServerHandle> {
         let token = cfg.lan_token.clone();
         let _cfg = cfg.clone();
         threads.push(std::thread::spawn(move || {
+            use std::panic::AssertUnwindSafe;
             // Blocks in recv(); no polling, no timer, 0% idle CPU (PLAN.md §6).
             while let Ok(request) = server.recv() {
-                handle(request, &_cfg, &db, &token);
+                // A panic anywhere in handle() must not permanently kill this
+                // worker (see hex_decode's fix above for why this matters —
+                // untrusted network input reaches this call). tiny_http sends
+                // a clean empty 500 when a Request is dropped unanswered, so
+                // the client gets a real response instead of a hang either way.
+                let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    handle(request, &_cfg, &db, &token);
+                }));
             }
         }));
     }
@@ -652,7 +676,11 @@ fn respond_stream(request: Request, db: &Db, query: &HashMap<String, String>) {
     };
     let len = match file.metadata() {
         Ok(m) => m.len(),
-        Err(_) => 0,
+        Err(e) => {
+            eprintln!("melodie: LAN server cannot stat {}: {e}", track.path);
+            let _ = request.respond(xml_response(error_envelope(70, "File not found")));
+            return;
+        }
     };
 
     let content_type = content_type_for(&extension_of(&track.path));
@@ -833,6 +861,14 @@ mod tests {
         assert!(!check_auth(token, &query_of(&[("t", "x")])), "t without s is not a credential");
         // An unset token must never authenticate anything.
         assert!(!check_auth("", &query_of(&[("p", "")])));
+    }
+
+    #[test]
+    fn check_auth_rejects_non_ascii_enc_without_panicking() {
+        let token = "s3cret";
+        // A multi-byte UTF-8 character after "enc:" used to panic on a
+        // byte-offset slice landing inside the character.
+        assert!(!check_auth(token, &query_of(&[("p", "enc:€x")])));
     }
 
     #[test]
