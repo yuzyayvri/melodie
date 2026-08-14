@@ -81,6 +81,8 @@ class LibraryActivity : Activity() {
 
     private fun showPlaylists() {
         openPlaylist = null
+        syncButtonView?.let { root.removeView(it) }
+        syncButtonView = null
         val local = LocalLibrary.load(filesDir).groupBy { it.playlist }
         val rows = playlists.map { p ->
             val synced = local[p.name]?.size ?: 0
