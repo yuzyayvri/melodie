@@ -2,6 +2,10 @@ package dev.melodie.companion
 
 import android.app.PendingIntent
 import android.content.Intent
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -18,7 +22,27 @@ class PlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
-        val player = ExoPlayer.Builder(this).build()
+        val player = ExoPlayer.Builder(this)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                    .build(),
+                /* handleAudioFocus = */ true,
+            )
+            .setWakeMode(C.WAKE_MODE_LOCAL)
+            .build()
+        player.addListener(object : Player.Listener {
+            // A missing/corrupt file (or the XML-error-as-audio case fixed
+            // in Subsonic.downloadTo) otherwise drops the player to
+            // STATE_IDLE with no recovery — just skip past it.
+            override fun onPlayerError(error: PlaybackException) {
+                if (player.hasNextMediaItem()) {
+                    player.seekToNextMediaItem()
+                    player.prepare()
+                }
+            }
+        })
         val open = PendingIntent.getActivity(
             this,
             0,
