@@ -144,9 +144,29 @@ class LibraryActivity : Activity() {
         root.addView(button)
     }
 
-    /** Filled in by Task 6. */
     private fun startSync(playlist: RemotePlaylist) {
-        Toast.makeText(this, "Sync not wired up yet", Toast.LENGTH_SHORT).show()
+        val queued = songs
+        if (queued.isEmpty()) return
+        status.text = "Syncing ${playlist.name}…"
+        Sync.playlist(
+            filesDir = filesDir,
+            client = client,
+            playlistName = playlist.name,
+            songs = queued,
+            onProgress = { done, total, title ->
+                main.post { status.text = "Syncing ${done + 1}/$total — $title" }
+            },
+            onDone = { synced, failed ->
+                main.post {
+                    status.text = if (failed == 0) {
+                        "${playlist.name}: $synced tracks on this phone"
+                    } else {
+                        "${playlist.name}: $synced synced, $failed failed"
+                    }
+                    showSongs(playlist)
+                }
+            },
+        )
     }
 
     /** Filled in by Task 7. */
