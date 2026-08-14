@@ -27,5 +27,18 @@
             android:name=".LibraryActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".PlayerActivity"
+            android:exported="false" />
+
+        <service
+            android:name=".PlaybackService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+
     </application>
 </manifest>

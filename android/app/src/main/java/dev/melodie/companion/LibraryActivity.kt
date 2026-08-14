@@ -180,9 +180,12 @@ class LibraryActivity : Activity() {
         )
     }
 
-    /** Filled in by Task 7. */
     private fun startPlayback(queue: List<LocalSong>, index: Int) {
-        Toast.makeText(this, "Playback not wired up yet", Toast.LENGTH_SHORT).show()
+        Queue.pending = queue
+        startActivity(
+            Intent(this, PlayerActivity::class.java)
+                .putExtra(PlayerActivity.EXTRA_INDEX, index)
+        )
     }
 
     private fun darkAdapter(rows: List<String>): ArrayAdapter<String> =
