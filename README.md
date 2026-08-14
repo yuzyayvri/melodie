@@ -1,10 +1,10 @@
 # Melodie
 
 A small, private music player. See `PLAN.md` for the full technical plan.
-This build implements **Phases 0–4**: library scan, playback, MPRIS/tray-less
-background playback, `.m3u8` playlists, SpotiSync's Exportify-CSV path, and a
-read-only LAN/Subsonic server with QR pairing. Phases 5–7 (Android companion,
-live librespot sync, CI hardening) are not implemented.
+This build implements **Phases 0–5**: library scan, playback, MPRIS/tray-less
+background playback, `.m3u8` playlists, SpotiSync's Exportify-CSV path, a
+read-only LAN/Subsonic server with QR pairing, and an Android companion app.
+Phases 6–7 (live librespot sync, CI hardening) are not implemented.
 
 ## Building
 
@@ -94,11 +94,25 @@ window, `Quit` exits for real.
   a **Pair** button (and headless `melodie --pair`) that shows the host,
   port and token as both text and a QR code. mDNS advertisement was
   deliberately skipped — see Deviations below.
+- **Phase 5** — an Android companion app (Kotlin, Views, `android/`): QR
+  pairing against the Phase 4 LAN server, playlist-selective offline sync
+  into app-private storage, and background playback via a Media3
+  `MediaSessionService` (lockscreen/Bluetooth controls, works in airplane
+  mode once synced). Shrunk release build measures **~1.1 MB**; see
+  `docs/android.md`.
 
 Verified against a real `yt-dlp`/`ffmpeg`/audio-device environment during
 development: CSV → search → score → auto-accept → download → tag → library
 → playlist `.m3u8` all confirmed working end to end, and MPRIS confirmed
 working against `playerctl`/`dbus-send`.
+
+## Android companion
+
+A phone client lives under `android/` and pairs with the LAN server above to
+browse playlists, sync tracks to app-private storage, and play them back in
+the background with lockscreen controls. The built APK is at
+`melodie-companion.apk` in the repo root — see `docs/android.md` for
+installing, pairing, and build instructions.
 
 ## Deviations from PLAN.md
 
@@ -155,6 +169,16 @@ working against `playerctl`/`dbus-send`.
   chatter against the §6 CPU budget.
 - **`getLicense` and `getMusicFolders` are served although PLAN.md §7's
   list omits them**: real clients refuse to proceed without them.
+- **Playlist-selective sync rather than whole-library mirroring.**
+  PLAN.md §7 says the app "syncs files over the Tier 0 endpoint into
+  app-private storage"; syncing everything would fill a phone, so sync is
+  per-playlist and opt-in.
+- **No background/scheduled sync.** Sync runs on demand while the app is
+  open; WorkManager was not worth a dependency for a manual mirror.
+- **The Android APK is signed with the debug key**, deliberately, so there
+  is no keystore to manage for a personal sideload.
+- **Measured APK size vs PLAN.md §7's 2–4 MB estimate**: the shrunk release
+  build is ~1.1 MB (1,161,133 bytes), under the low end of the estimate.
 
 ## Resource budget
 
