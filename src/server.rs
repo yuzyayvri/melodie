@@ -1323,6 +1323,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Auth correctness for the binary endpoints currently rests on code
+    /// ordering in `handle()` (routing to `respond_stream` sits below
+    /// `check_auth`) — nothing else would catch a future refactor that
+    /// reorders it and lets `stream`/`download`/`getCoverArt` serve bytes
+    /// with no credentials at all.
+    #[test]
+    fn stream_rejects_requests_with_no_credentials() {
+        let (handle, dir) = seeded_server();
+        let (_s, _h, body) = http_get(handle.addr, "/rest/stream.view?id=tr1");
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("status=\"failed\""), "body was {body}");
+        assert!(
+            body.contains("code=\"40\""),
+            "missing credentials must reject before reaching the binary path: {body}"
+        );
+        handle.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn cover_art_falls_back_to_the_spotisync_thumbnail_and_404s_otherwise() {
         let (handle, dir) = seeded_server();
@@ -1339,5 +1358,171 @@ mod tests {
 
         handle.stop();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The `covers/<video_id>.jpg` fallback: the only cover-art path a track
+    /// with no embedded picture (i.e. every raw-ADTS SpotiSync download) or
+    /// an album/artist id can resolve through.
+    #[test]
+    fn cover_art_falls_back_to_covers_dir_when_spotisync_provenance_exists() {
+        let dir = unique_test_dir("melodie-coverart-fallback-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.mp3");
+        std::fs::write(&a, vec![0xAAu8; 5000]).unwrap();
+
+        let db = Arc::new(Db::open(Path::new(":memory:")).unwrap());
+        let track_row_id = db
+            .upsert_track(&crate::db::NewTrack {
+                path: a.to_str().unwrap(),
+                title: "Rhubarb",
+                artist: "Aphex Twin",
+                album: "SAW II",
+                track_no: Some(1),
+                duration_ms: 210_000,
+                mtime: 1,
+                size: std::fs::metadata(&a).unwrap().len() as i64,
+            })
+            .unwrap();
+
+        // Give the track SpotiSync provenance so `cover_video_id_for_track`
+        // (joined on tags, not path — see its doc comment) resolves it.
+        db.upsert_spotify_track(&crate::db::SpotifyTrackRow {
+            uri: "spotify:track:abc".to_string(),
+            title: "Rhubarb".to_string(),
+            artist: "Aphex Twin".to_string(),
+            album: "SAW II".to_string(),
+            duration_ms: 210_000,
+            isrc: None,
+        })
+        .unwrap();
+        db.upsert_match("spotify:track:abc", Some("yt123"), Some(90.0), true).unwrap();
+
+        // The thumbnail SpotiSync would have saved, sitting in covers/.
+        let covers_dir = dir.join("covers");
+        std::fs::create_dir_all(&covers_dir).unwrap();
+        let jpg_bytes = vec![0xFFu8, 0xD8, 0xFF, 0xAB, 0xCD];
+        std::fs::write(covers_dir.join("yt123.jpg"), &jpg_bytes).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.lan_enabled = true;
+        cfg.lan_bind = "127.0.0.1".to_string();
+        cfg.lan_port = 0;
+        cfg.lan_token = "testtoken".to_string();
+        cfg.data_dir = dir.clone(); // so cfg.covers_dir() finds covers_dir above
+        let handle = spawn(&cfg, db).expect("server starts");
+        let auth = "u=m&p=testtoken&c=test";
+
+        let (status, headers, body) = http_get(
+            handle.addr,
+            &format!("/rest/getCoverArt.view?{auth}&id={}", track_id(track_row_id)),
+        );
+        assert!(status.contains("200"), "{status}");
+        assert!(headers.to_lowercase().contains("image/jpeg"), "{headers}");
+        assert_eq!(body, jpg_bytes, "should serve the exact covers/ file bytes");
+
+        // Album and artist ids reach the same fallback — they resolve to
+        // *some* track under them, then follow the identical lookup.
+        let album = album_id("Aphex Twin", "SAW II");
+        let (status, _h, body2) =
+            http_get(handle.addr, &format!("/rest/getCoverArt.view?{auth}&id={album}"));
+        assert!(status.contains("200"), "album id should resolve cover art too: {status}");
+        assert_eq!(body2, jpg_bytes);
+
+        handle.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The embedded-picture path: a file with a real tagged picture must be
+    /// preferred over any covers/ fallback (PLAN.md §3, the library is the
+    /// source of truth). Builds a minimal valid WAV (same shape as
+    /// engine.rs's `write_silence_wav` test helper) since lofty needs an
+    /// actual probeable audio file to tag, not raw bytes.
+    #[test]
+    fn cover_art_serves_the_embedded_picture_when_present() {
+        use lofty::config::WriteOptions;
+        use lofty::file::TaggedFileExt;
+        use lofty::picture::{MimeType, Picture, PictureType};
+        use lofty::probe::Probe;
+        use lofty::tag::{Tag, TagExt};
+
+        let dir = unique_test_dir("melodie-coverart-embedded-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.wav");
+        write_minimal_wav(&path);
+
+        let png_bytes = vec![0x89, 0x50, 0x4E, 0x47, 1, 2, 3, 4];
+        let mut tagged = Probe::open(&path).unwrap().read().unwrap();
+        if tagged.primary_tag().is_none() {
+            let tag_type = tagged.primary_tag_type();
+            tagged.insert_tag(Tag::new(tag_type));
+        }
+        let tag = tagged.primary_tag_mut().unwrap();
+        tag.push_picture(Picture::new_unchecked(
+            PictureType::CoverFront,
+            Some(MimeType::Png),
+            None,
+            png_bytes.clone(),
+        ));
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        tag.save_to(&mut file, WriteOptions::default()).unwrap();
+        drop(file);
+
+        let db = Arc::new(Db::open(Path::new(":memory:")).unwrap());
+        let track_row_id = db
+            .upsert_track(&crate::db::NewTrack {
+                path: path.to_str().unwrap(),
+                title: "Rhubarb",
+                artist: "Aphex Twin",
+                album: "SAW II",
+                track_no: Some(1),
+                duration_ms: 210_000,
+                mtime: 1,
+                size: std::fs::metadata(&path).unwrap().len() as i64,
+            })
+            .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.lan_enabled = true;
+        cfg.lan_bind = "127.0.0.1".to_string();
+        cfg.lan_port = 0;
+        cfg.lan_token = "testtoken".to_string();
+        cfg.data_dir = dir.clone();
+        let handle = spawn(&cfg, db).expect("server starts");
+        let auth = "u=m&p=testtoken&c=test";
+
+        let (status, headers, body) = http_get(
+            handle.addr,
+            &format!("/rest/getCoverArt.view?{auth}&id={}", track_id(track_row_id)),
+        );
+        assert!(status.contains("200"), "{status}");
+        assert!(headers.to_lowercase().contains("image/png"), "{headers}");
+        assert_eq!(body, png_bytes, "should serve the embedded picture's exact bytes");
+
+        handle.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A tiny valid WAV header (no audio data needed) that lofty can probe
+    /// and tag — mirrors `engine.rs`'s test-only `write_silence_wav`.
+    fn write_minimal_wav(path: &Path) {
+        let sample_rate = 8000u32;
+        let data_len = sample_rate * 2; // 1 second, 16-bit mono
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&(36 + data_len).to_le_bytes());
+        buf.extend_from_slice(b"WAVEfmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        buf.extend_from_slice(&1u16.to_le_bytes()); // mono
+        buf.extend_from_slice(&sample_rate.to_le_bytes());
+        buf.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
+        buf.extend_from_slice(&2u16.to_le_bytes()); // block align
+        buf.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.extend(std::iter::repeat(0u8).take(data_len as usize));
+        std::fs::write(path, buf).unwrap();
     }
 }
