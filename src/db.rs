@@ -298,6 +298,7 @@ impl Db {
     /// Joined on tags rather than path for the same reason
     /// `get_track_id_by_tags` exists: the on-disk extension isn't stable
     /// (PLAN.md §5.5's format fallback, plus the ADTS remux).
+    #[allow(dead_code)]
     pub fn cover_video_id_for_track(&self, track_id: i64) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
