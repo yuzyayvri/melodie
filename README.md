@@ -175,6 +175,11 @@ installing, pairing, and build instructions.
   per-playlist and opt-in.
 - **No background/scheduled sync.** Sync runs on demand while the app is
   open; WorkManager was not worth a dependency for a manual mirror.
+- **The local sync manifest is a hand-rolled TSV file (`library.tsv`), not
+  the `library.json` the original design spec mentioned.** `org.json`
+  (Android's built-in JSON class) is a stub outside a real device, so it
+  can't be exercised by a JVM unit test; a TSV manifest with its own tested
+  `encodeLine`/`decodeLine` functions can be.
 - **The Android APK is signed with the debug key**, deliberately, so there
   is no keystore to manage for a personal sideload.
 - **Measured APK size vs PLAN.md §7's 2–4 MB estimate**: the shrunk release
