@@ -6,6 +6,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.Editable
+import android.text.TextWatcher
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -59,6 +62,8 @@ class LibraryActivity : Activity() {
     private var topBarView: LinearLayout? = null
     private var searchInput: EditText? = null
     private var sortSpinner: Spinner? = null
+    private var searchQuery: String = ""
+    private var sortField: SortField = SortField.TITLE
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -206,28 +211,92 @@ class LibraryActivity : Activity() {
         }.start()
     }
 
+    /**
+     * Entry point when a playlist is tapped: resets search/sort, builds the
+     * top bar and the search/sort controls once, then renders. `startSync`'s
+     * completion callback calls `renderSongs` directly instead (search text
+     * and sort choice shouldn't reset just because a sync finished).
+     */
     private fun showSongs(playlist: RemotePlaylist) {
+        searchQuery = ""
+        sortField = SortField.TITLE
+        setTopBar(playlist.name) { showPlaylists() }
+        setupSearchAndSortBar(playlist)
+        renderSongs(playlist)
+    }
+
+    private fun setupSearchAndSortBar(playlist: RemotePlaylist) {
+        searchInput?.let { root.removeView(it) }
+        sortSpinner?.let { root.removeView(it) }
+
+        val input = Ui.input(this, "Search songs")
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                searchQuery = s?.toString() ?: ""
+                renderSongs(playlist)
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
+
+        val spinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@LibraryActivity,
+                android.R.layout.simple_spinner_item,
+                listOf("Title", "Artist", "Album", "Duration"),
+            ).apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                    sortField = SortField.entries[position]
+                    renderSongs(playlist)
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = Ui.dp(this@LibraryActivity, 4) }
+        }
+
+        // Inserted right below the top bar (index 0), above `status`/`list`
+        // — `showPlaylists()` always removes these two before this is ever
+        // called again, so `root`'s children are reliably
+        // [topBar, status, list] (indices 0-2) at this point.
+        root.addView(input, 1)
+        root.addView(spinner, 2)
+        searchInput = input
+        sortSpinner = spinner
+    }
+
+    /**
+     * The single place the song list's rows, status text, sync button, and
+     * tap-to-play ordering get built from `songs` + the current
+     * search/sort state. Queuing from the *displayed* (filtered/sorted)
+     * order — not the server's raw order — is the fix: previously a tap
+     * always queued from `songs` even though nothing kept that in sync with
+     * what was on screen.
+     */
+    private fun renderSongs(playlist: RemotePlaylist) {
         val local = LocalLibrary.load(filesDir).filter { it.playlist == playlist.name }
         val haveIds = local.map { it.id }.toSet()
-        val rows = songs.map { s ->
-            val mark = if (s.id in haveIds) "" else "  (not synced)"
-            "${s.title}\n${s.artist}$mark"
+        val displayed = filterAndSortSongs(songs, searchQuery, sortField)
+        val rows = displayed.map { s ->
+            val subtitle = if (s.id in haveIds) s.artist else "${s.artist}  (not synced)"
+            s.title to subtitle
         }
         status.text = "${playlist.name} — ${haveIds.size}/${songs.size} on this phone"
-        list.adapter = darkAdapter(rows)
+        list.adapter = Ui.twoLineAdapter(this, rows)
         list.setOnItemClickListener { _, _, index, _ ->
-            val song = songs[index]
+            val song = displayed[index]
             val localSong = local.firstOrNull { it.id == song.id }
             if (localSong == null) {
                 Toast.makeText(this, "Sync this playlist first", Toast.LENGTH_SHORT).show()
             } else {
-                val ordered = songs.mapNotNull { s -> local.firstOrNull { it.id == s.id } }
+                val ordered = displayed.mapNotNull { s -> local.firstOrNull { it.id == s.id } }
                 val start = ordered.indexOfFirst { it.id == song.id }
                 startPlayback(ordered, if (start < 0) 0 else start)
             }
         }
-        // No RemotePlaylist.id to sync against for an offline entry — there's
-        // nothing a Sync button could do here that hasn't already happened.
         if (playlist.id.isEmpty()) {
             syncButtonView?.let { root.removeView(it) }
             syncButtonView = null
@@ -266,7 +335,7 @@ class LibraryActivity : Activity() {
                     } else {
                         "${playlist.name}: $synced synced, $failed failed"
                     }
-                    showSongs(playlist)
+                    renderSongs(playlist)
                 }
             },
         )
@@ -282,13 +351,4 @@ class LibraryActivity : Activity() {
                 .putExtra(PlayerActivity.EXTRA_INDEX, index)
         )
     }
-
-    private fun darkAdapter(rows: List<String>): ArrayAdapter<String> =
-        object : ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, rows) {
-            override fun getView(position: Int, convertView: android.view.View?, parent: android.view.ViewGroup): android.view.View {
-                val view = super.getView(position, convertView, parent)
-                (view as android.widget.TextView).setTextColor(Ui.FG)
-                return view
-            }
-        }
 }
