@@ -39,7 +39,7 @@ class PairActivity : Activity() {
         }
 
         val root = Ui.column(this)
-        root.addView(Ui.label(this, "Pair with Melodie", 22f))
+        root.addView(Ui.topBar(this, "Pair with Melodie", null))
         root.addView(
             Ui.dim(
                 this,
