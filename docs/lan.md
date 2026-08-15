@@ -30,6 +30,18 @@ For a third-party Subsonic client, enter:
 - Username: anything (there are no accounts)
 - Password: the `lan_token` value
 
+If a client (phone or third-party) scans/enters everything correctly but
+still can't reach the server, check the host machine's firewall before
+suspecting Melodie or the network — `resolve_bind`/`detect_lan_ip` binding
+successfully only proves the *socket* is open, not that inbound traffic
+from another device is allowed to reach it. On a `firewalld` system in
+particular, the default `public` zone allows nothing but `ssh` and
+`dhcpv6-client` in; a fresh install needs an explicit rule:
+`sudo firewall-cmd --zone=public --add-port=<lan_port>/tcp --permanent &&
+sudo firewall-cmd --reload` (check the active zone/interface first with
+`firewall-cmd --get-active-zones`). `ufw`/`iptables` setups need the
+equivalent for their own tooling.
+
 ## Supported methods
 
 `ping`, `getLicense`, `getMusicFolders`, `getIndexes`, `getMusicDirectory`,
