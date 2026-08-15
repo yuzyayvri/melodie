@@ -7,8 +7,10 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.widget.ArrayAdapter
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.Spinner
 import android.widget.Toast
 
 enum class SortField { TITLE, ARTIST, ALBUM, DURATION }
@@ -54,6 +56,9 @@ class LibraryActivity : Activity() {
     private var playlists: List<RemotePlaylist> = emptyList()
     private var openPlaylist: RemotePlaylist? = null
     private var songs: List<RemoteSong> = emptyList()
+    private var topBarView: LinearLayout? = null
+    private var searchInput: EditText? = null
+    private var sortSpinner: Spinner? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -76,7 +81,7 @@ class LibraryActivity : Activity() {
                 0,
             ).apply { weight = 1f }
         }
-        root.addView(Ui.label(this, "Melodie", 22f))
+        setTopBar("Melodie", null)
         root.addView(status)
         root.addView(list)
         setContentView(root)
@@ -92,6 +97,13 @@ class LibraryActivity : Activity() {
 
     override fun onBackPressed() {
         if (openPlaylist != null) showPlaylists() else super.onBackPressed()
+    }
+
+    private fun setTopBar(title: String, onBack: (() -> Unit)?) {
+        topBarView?.let { root.removeView(it) }
+        val bar = Ui.topBar(this, title, onBack)
+        root.addView(bar, 0)
+        topBarView = bar
     }
 
     private fun loadPlaylists() {
@@ -151,16 +163,21 @@ class LibraryActivity : Activity() {
 
     private fun showPlaylists() {
         openPlaylist = null
+        setTopBar("Melodie", null)
         syncButtonView?.let { root.removeView(it) }
         syncButtonView = null
+        searchInput?.let { root.removeView(it) }
+        searchInput = null
+        sortSpinner?.let { root.removeView(it) }
+        sortSpinner = null
         val local = LocalLibrary.load(filesDir).groupBy { it.playlist }
         val rows = playlists.map { p ->
             val synced = local[p.name]?.size ?: 0
-            if (synced > 0) "${p.name}\n$synced of ${p.songCount} on this phone"
-            else "${p.name}\n${p.songCount} tracks — not synced"
+            val subtitle = if (synced > 0) "$synced of ${p.songCount} on this phone" else "${p.songCount} tracks — not synced"
+            p.name to subtitle
         }
         status.text = if (playlists.isEmpty()) "No playlists on the server yet." else "Tap a playlist."
-        list.adapter = darkAdapter(rows)
+        list.adapter = Ui.twoLineAdapter(this, rows)
         list.setOnItemClickListener { _, _, index, _ -> openPlaylist(playlists[index]) }
     }
 
