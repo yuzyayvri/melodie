@@ -33,8 +33,18 @@ Phone and computer must be on the same Wi-Fi. If the camera is awkward,
 - The first screen lists the playlists on the desktop.
 - Tap one to see its tracks, then **Sync … to this phone** to download them
   into app-private storage.
+- Search and Sort (Title/Artist/Album/Duration) live at the top of a
+  playlist's track list, filtering/reordering it live — the same behavior
+  as the desktop window. Tap-to-play always queues from what's currently
+  on screen, so a search or sort in effect changes what Next/Previous walk
+  through, not just what's listed.
 - Tap a synced track to play. Playback continues with the screen off and the
   app closed, with lockscreen and Bluetooth controls.
+- The Player screen has a Shuffle button next to Previous/Next; it stays on
+  across playlists until toggled off.
+- A "‹" back button sits at the top of every screen except the playlist
+  list (the app's home) — you don't have to rely on the phone's gesture/
+  system back to leave the Player screen.
 - Synced tracks play with no network at all — airplane mode included.
 
 Re-syncing a playlist downloads only what's missing. Tracks removed from a

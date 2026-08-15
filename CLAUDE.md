@@ -11,7 +11,11 @@ Phases 4–5 are also implemented: a read-only LAN/Subsonic server
 (`src/server.rs`, `src/ui/pair.rs`, gated behind the default-on `lan` cargo
 feature — see "LAN/Subsonic server and Android companion" below) and an
 Android companion app under `android/` (`docs/android.md`, `docs/lan.md`).
-Phases 6–7 (live librespot sync, CI hardening) are not built. Read
+Beyond PLAN.md's phases, both the desktop window and the Android app now
+have search/sort/shuffle and (Android only) a top-bar back-navigation pass
+— see "Search, sort, and shuffle (desktop)" and the Android nav/search/
+sort/shuffle paragraphs under "LAN/Subsonic server and Android companion"
+below. Phases 6–7 (live librespot sync, CI hardening) are not built. Read
 `PLAN.md` before making architectural changes — it's the design doc this
 was built from, cites its research, and documents the tradeoffs. Read
 `README.md`'s "Deviations from PLAN.md" section too; several are
@@ -87,6 +91,36 @@ reintroduce a separate "if looping" branch elsewhere if you touch this:
   gapless for everything else. A small gap on the loop point itself is the
   deliberate trade-off for not touching `appended`/`session_start`
   bookkeeping.
+
+### Search, sort, and shuffle (desktop)
+
+`app.rs`'s `ViewState` (`search: String`, `sort: SortField`, `shuffle:
+bool`, held in the same `Rc<RefCell<_>>` pattern as `current_queue`) is the
+single piece of state the search `Input`, sort `Choice`, and shuffle
+`Button` in `ui/mod.rs` all write to. `apply_view(tracks, &view)` is the
+pure function (filter by substring across title/artist/album, then sort or
+Fisher-Yates shuffle) and `refresh_view(...)` is the only place its output
+turns into both `list` (the UI) and `current_queue` (what Play/Next/
+Previous actually load) — every caller that used to rebuild the list by
+hand (`repopulate_from`, the playlist-choice callback, the new search/sort/
+shuffle callbacks, `handle_worker_event`'s `SyncFinished`/`LibraryChanged`
+paths) goes through it now. Don't reintroduce a second tracks→list
+conversion; add a new caller of `refresh_view` instead.
+
+Shuffle uses a hand-rolled `SystemTime`-seeded xorshift64 PRNG
+(`shuffle_in_place`), not the `rand` crate — `rand`/`fastrand` aren't a
+direct dependency (only transitive, via other crates) and one Fisher-Yates
+pass doesn't justify adding one. This mirrors the Android side's opposite
+tradeoff: mobile shuffles via Media3's built-in `shuffleModeEnabled`
+because that dependency is already there, so hand-rolling would be the
+wrong direction on that platform. Neither switching desktop to a real RNG
+crate nor hand-rolling a reorder on Android is an improvement — each
+platform already has the cheaper option for what it has installed.
+
+None of this touches `engine.rs`: switching playlists, searching, sorting,
+or toggling shuffle only ever stages `current_queue`, which the engine
+doesn't see until a double-click, Next, or Previous asks it to load
+something. Playback is never interrupted by typing in the search box.
 
 ### Filesystem is the source of truth
 
@@ -235,6 +269,47 @@ so the rest of the screen knows to skip network calls for it) rather than
 stranding already-synced tracks. Sync itself only ever runs in the
 foreground on an explicit tap — no `WorkManager`, no background scheduler,
 by design (`docs/android.md`'s "Deliberate limits").
+
+Every non-root screen (`LibraryActivity`'s song list, `PlayerActivity`)
+gets an on-screen back affordance via `Ui.topBar(context, title, onBack)`
+— a hand-rolled back chevron + bold title row, not a `Toolbar`/`ActionBar`
+(would need AppCompat). Root screens (`LibraryActivity`'s playlist list,
+`PairActivity`) pass `onBack = null`. `Ui.column()`, the root view every
+screen builds on, also pads itself for the status bar/camera cutout/nav bar
+via a `setOnApplyWindowInsetsListener` using the deprecated-but-functional
+`systemWindowInsetTop`/`systemWindowInsetBottom` fields — chosen over the
+API-30 `WindowInsets.Type` family specifically so there's no `SDK_INT`
+branch needed against `minSdk = 24`. Fixed once in `column()`, not
+per-activity, since every screen routes through it.
+
+`LibraryActivity.kt`'s `filterAndSortSongs(songs, query, sort)` is a pure,
+framework-free top-level function (JVM-testable, `LibraryActivityTest.kt`)
+mirroring desktop's `apply_view` above — same filter-then-sort shape, same
+case-insensitive substring match. Its consumer, `renderSongs(playlist)`,
+is the single place the song list's rows, status text, sync-button
+visibility, and tap-to-play queue get built — **the queue is built from
+the displayed (filtered/sorted) list, not the server's raw `songs` order**;
+an earlier version queued from `songs` regardless of what was on screen,
+which would have silently diverged the moment sort landed. Don't
+reintroduce a second queue-building path that reads `songs` directly.
+`renderSongs` itself only handles rendering — the local-library lookup and
+sync-button visibility are computed once per playlist-open/sync-complete
+(`showSongs`/`startSync`'s `onDone`) and cached in `localForPlaylist`/
+`haveIdsForPlaylist` fields, not recomputed from disk on every keystroke.
+
+Shuffle (`PlayerActivity`) toggles Media3's native
+`controller.shuffleModeEnabled` directly rather than reordering the queue
+by hand — see the desktop comparison above. State survives across songs via
+`Queue.shuffleEnabled`, applied to the controller in `connect()` right
+after `controller = c` (and thus after the existing stale-controller-future
+guard, not inside it). **`updateShuffleColor()` must toggle the button's
+*text* color (`Ui.ACCENT`/`Ui.FG_DIM`), not its fill** — `Ui.button()`
+hardcodes white-on-`ACCENT` text, so swapping the fill alone to `BG_ALT`
+for the off state leaves near-invisible dark-on-dark text. This shipped
+broken once already and was only caught by a final whole-branch review,
+not any single task's review or the compiler — if you touch this button,
+check it renders with both fill *and* text visible in the off state, not
+just that it compiles.
 
 ### UI
 

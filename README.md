@@ -79,8 +79,11 @@ window, `Quit` exits for real.
   virtualised track list (only visible rows are drawn/laid out), keyboard
   controls, `state.toml` persistence (volume, last track, position).
   Also (beyond PLAN.md): loop modes (off/repeat-queue/repeat-track,
-  persisted), and a UI pass — rounded buttons, event-driven hover feedback,
-  a playing-row accent bar — with no added idle CPU/RAM cost.
+  persisted), a UI pass — rounded buttons, event-driven hover feedback,
+  a playing-row accent bar — with no added idle CPU/RAM cost, and live
+  search/sort (Title/Artist/Album/Duration)/shuffle over the track list,
+  staged through the same queue the engine already reloads from on
+  Next/Previous — no playback interruption while searching or sorting.
 - **Phase 2** — `souvlaki` MPRIS integration (play/pause/next/prev/seek/
   volume/raise/quit), window-close backgrounds instead of quitting,
   playlists read from and written to `.m3u8`, synced into the DB cache.
@@ -99,7 +102,11 @@ window, `Quit` exits for real.
   into app-private storage, and background playback via a Media3
   `MediaSessionService` (lockscreen/Bluetooth controls, works in airplane
   mode once synced). Shrunk release build measures **~1.1 MB**; see
-  `docs/android.md`.
+  `docs/android.md`. Also (beyond PLAN.md): an on-screen back button on
+  every non-root screen, edge-to-edge-safe layout (no more clipping under
+  a display cutout), and search/sort/shuffle matching the desktop feature
+  for feature — zero new Gradle dependencies for any of it (shuffle reuses
+  Media3's built-in `shuffleModeEnabled`).
 
 Verified against a real `yt-dlp`/`ffmpeg`/audio-device environment during
 development: CSV → search → score → auto-accept → download → tag → library
