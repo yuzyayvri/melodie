@@ -141,8 +141,7 @@ fn to_row(t: &Track) -> Row {
     }
 }
 
-#[cfg_attr(not(feature = "lan"), allow(unused_mut))]
-pub fn run(mut cfg: Config, db: Db) -> ExitCode {
+pub fn run(cfg: Config, db: Db) -> ExitCode {
     ui::theme::apply();
     let fltk_app = fltk::app::App::default();
     let (msg_tx, msg_rx) = fltk::app::channel::<Message>();
@@ -198,63 +197,79 @@ pub fn run(mut cfg: Config, db: Db) -> ExitCode {
     });
     let _ = worker_tx.send(WorkerCommand::SyncInbox);
 
-    // Resolve the LAN token exactly once, before anything that needs it
-    // exists — so the running server and the Pair button can never observe
-    // two different tokens. Previously each block below cloned `cfg` at a
-    // different point and called `ensure_lan_token()` itself: on first run
-    // (empty token on disk) the server block would generate+save token A
-    // and start the server with it, while the pair-button closure held a
-    // clone taken *before* that mutation, so its own `ensure_lan_token()`
-    // call generated a different token B, overwrote the config file with
-    // it, and displayed B in the QR code — pairing against a server that
-    // only accepted A. Resolving here means both blocks below clone from
-    // the same already-resolved `cfg` and never call `ensure_lan_token()`
-    // again.
+    // A single `Config` shared between the startup auto-start below and the
+    // Pair button's callback, both of which may need to turn the server on
+    // and pick a token — sharing one instance (instead of each taking its
+    // own `cfg.clone()`, as an earlier version did) means there is only
+    // ever one place a token or `lan_enabled` gets resolved, so the two
+    // paths can't race and disagree with each other. The server handle
+    // lives alongside it so the button can tell "already running" from
+    // "needs starting", and so the handle has somewhere to live for the
+    // process lifetime once it exists (dropping it stops the server; the
+    // process exiting does that anyway).
     #[cfg(feature = "lan")]
-    if cfg.lan_enabled && cfg.ensure_lan_token() {
-        if let Err(e) = cfg.save() {
-            eprintln!("melodie: could not save the generated LAN token: {e:#}");
+    let lan_state: Rc<RefCell<(Config, Option<crate::server::ServerHandle>)>> =
+        Rc::new(RefCell::new((cfg.clone(), None)));
+
+    #[cfg(feature = "lan")]
+    if cfg.lan_enabled {
+        let mut state = lan_state.borrow_mut();
+        if state.0.ensure_lan_token() {
+            if let Err(e) = state.0.save() {
+                eprintln!("melodie: could not save the generated LAN token: {e:#}");
+            }
+        }
+        match crate::server::spawn(&state.0, db.clone()) {
+            Ok(handle) => {
+                eprintln!("melodie: LAN server listening on http://{}", handle.addr);
+                state.1 = Some(handle);
+            }
+            Err(e) => {
+                // Never fatal: a music player that refuses to start
+                // because a socket is busy is a broken music player.
+                eprintln!("melodie: LAN server disabled: {e:#}");
+            }
         }
     }
 
-    // LAN server (PLAN.md §7 Tier 0). Held for the process lifetime; the
-    // handle is only needed to stop it, and the process exiting does that.
-    #[cfg(feature = "lan")]
-    let _lan = {
-        let cfg = cfg.clone();
-        if cfg.lan_enabled {
-            match crate::server::spawn(&cfg, db.clone()) {
-                Ok(handle) => {
-                    eprintln!("melodie: LAN server listening on http://{}", handle.addr);
-                    Some(handle)
-                }
-                Err(e) => {
-                    // Never fatal: a music player that refuses to start
-                    // because a socket is busy is a broken music player.
-                    eprintln!("melodie: LAN server disabled: {e:#}");
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    };
-
     #[cfg(feature = "lan")]
     {
-        let cfg_for_pair = cfg.clone();
+        let lan_state = lan_state.clone();
+        let db = db.clone();
         win.pair_btn.set_callback(move |_| {
-            if !cfg_for_pair.lan_enabled {
-                eprintln!(
-                    "melodie: set `lan_enabled = true` in {} and restart to pair a phone",
-                    Config::config_path().display()
-                );
-                return;
+            let mut state = lan_state.borrow_mut();
+            if state.1.is_none() {
+                // Clicking Pair *is* the opt-in: PLAN.md §7's "off by
+                // default" is a privacy default enforced at runtime, not a
+                // reason to make the button whose whole job is turning
+                // pairing on instead print a hint to go hand-edit
+                // config.toml and restart. Turn it on right here.
+                state.0.lan_enabled = true;
+                state.0.ensure_lan_token();
+                if let Err(e) = state.0.save() {
+                    fltk::dialog::alert_default(&format!(
+                        "Couldn't save {}: {e:#}",
+                        Config::config_path().display()
+                    ));
+                    return;
+                }
+                match crate::server::spawn(&state.0, db.clone()) {
+                    Ok(handle) => {
+                        eprintln!("melodie: LAN server listening on http://{}", handle.addr);
+                        state.1 = Some(handle);
+                    }
+                    Err(e) => {
+                        fltk::dialog::alert_default(&format!(
+                            "Couldn't start the LAN server: {e:#}"
+                        ));
+                        return;
+                    }
+                }
             }
             let host = net::detect_lan_ip().unwrap_or(std::net::IpAddr::V4(
                 std::net::Ipv4Addr::LOCALHOST,
             ));
-            ui::pair::show(&ui::pair::pairing_url(&host, cfg_for_pair.lan_port, &cfg_for_pair.lan_token));
+            ui::pair::show(&ui::pair::pairing_url(&host, state.0.lan_port, &state.0.lan_token));
         });
     }
 

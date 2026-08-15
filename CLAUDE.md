@@ -189,20 +189,27 @@ rather than disabling them at runtime.
 
 `server.rs` is a hand-written OpenSubsonic subset (`tiny_http`, XML via
 `format!`, deliberately no serialization crate for a dozen response
-elements) spawned on its own thread by `server::spawn`, held in `app.rs`
-for the process lifetime purely so its `JoinHandle` doesn't get dropped —
-never touched again after startup. It never writes to the library; every
-endpoint is read-only.
+elements), spawned on its own thread by `server::spawn`. It never writes to
+the library; every endpoint is read-only.
 
-**The LAN token is resolved exactly once**, in `app.rs::run()`, before
-either the server or the Pair button's callback are created — both then
-clone from that single already-resolved `Config`. This fixes a real
-first-run race: resolving the token separately in each block let the
-server generate+save token A while the pair-button closure (holding an
-earlier `Config` clone) generated a different token B and displayed *that*
-in the QR code, pairing against a server that only accepted A. Don't
-reintroduce a second `ensure_lan_token()` call anywhere in the startup
-path.
+**Clicking Pair is itself the opt-in**, not just a QR display. PLAN.md
+§7's "off by default" is a runtime privacy default (`config.toml`'s
+`lan_enabled`), and the button that's supposed to turn pairing on used to
+just `eprintln!` a "go edit config.toml and restart" message and return if
+it was still off — invisible to anyone not watching a terminal, so the
+button appeared to do nothing at all. `app.rs::run()` now keeps a single
+`Rc<RefCell<(Config, Option<ServerHandle>)>>` (`lan_state`) shared between
+the startup auto-start (if `lan_enabled` was already `true` on disk) and
+the button's callback: whichever of the two runs first — startup or the
+first click — is the one that calls `ensure_lan_token()`, `Config::save()`,
+and `server::spawn()`, and it stores the resulting handle back in the
+shared cell. The other path (or a second click) just sees `state.1 ==
+Some(_)` and shows the QR immediately. Sharing one `Config`/handle instead
+of each path taking its own `cfg.clone()` is what makes this
+race-proof — there is structurally only one place either the token or the
+running server can come from, not a convention to remember. Don't
+reintroduce a second `cfg.clone()` + `ensure_lan_token()` call anywhere in
+this path; add a new consumer of `lan_state` instead.
 
 The Android app (`android/`) is a deliberately dependency-starved Subsonic
 client: exactly three third-party deps
