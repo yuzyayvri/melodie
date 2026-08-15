@@ -45,6 +45,10 @@ class LibraryActivity : Activity() {
         list = ListView(this).apply {
             setBackgroundColor(Ui.BG)
             divider = null
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+            ).apply { weight = 1f }
         }
         root.addView(Ui.label(this, "Melodie", 22f))
         root.addView(status)

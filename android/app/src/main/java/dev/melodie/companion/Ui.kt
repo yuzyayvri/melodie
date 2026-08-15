@@ -2,25 +2,35 @@ package dev.melodie.companion
 
 import android.content.Context
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 
-/** Views in code, not XML: no layout inflation, no AppCompat, no resources. */
+/**
+ * Views in code, not XML: no layout inflation, no AppCompat, no resources.
+ * Palette and rounded-flat button look mirror the desktop's `ui/theme.rs`
+ * (same hex values) so the phone doesn't feel like a different app.
+ */
 object Ui {
-    val BG = Color.parseColor("#1B1B1F")
-    val BG_ALT = Color.parseColor("#26262B")
-    val FG = Color.parseColor("#E6E6EA")
-    val FG_DIM = Color.parseColor("#9A9AA4")
-    val ACCENT = Color.parseColor("#E8B44A")
+    val BG = Color.parseColor("#1A1B1E")
+    val BG_ALT = Color.parseColor("#22232B")
+    val FG = Color.parseColor("#ECECEE")
+    val FG_DIM = Color.parseColor("#8D8D94")
+    val ACCENT = Color.parseColor("#6CA8FF")
+
+    /** Caps single-column content at a readable width on tall/wide phones instead of edge-to-edge. */
+    private const val MAX_CONTENT_DP = 300
 
     fun dp(context: Context, value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
 
     fun column(context: Context): LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_HORIZONTAL
         setBackgroundColor(BG)
         val p = dp(context, 16)
         setPadding(p, p, p, p)
@@ -35,7 +45,9 @@ object Ui {
             this.text = text
             textSize = size
             setTextColor(FG)
-            setPadding(0, dp(context, 4), 0, dp(context, 4))
+            gravity = Gravity.CENTER
+            maxWidth = dp(context, MAX_CONTENT_DP)
+            setPadding(0, dp(context, 6), 0, dp(context, 6))
         }
 
     fun dim(context: Context, text: String, size: Float = 13f): TextView =
@@ -45,13 +57,36 @@ object Ui {
         this.hint = hint
         setTextColor(FG)
         setHintTextColor(FG_DIM)
+        gravity = Gravity.CENTER
+        background = rounded(fill = BG_ALT, stroke = FG_DIM, radiusDp = 8, context = context)
+        val h = dp(context, 12)
+        val v = dp(context, 10)
+        setPadding(h, v, h, v)
+        layoutParams = LinearLayout.LayoutParams(dp(context, MAX_CONTENT_DP), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(context, 6)
+        }
     }
 
     fun button(context: Context, text: String, onClick: () -> Unit): Button =
         Button(context).apply {
             this.text = text
+            isAllCaps = false
             setTextColor(BG)
-            setBackgroundColor(ACCENT)
+            background = rounded(fill = ACCENT, stroke = null, radiusDp = 8, context = context)
+            val h = dp(context, 20)
+            val v = dp(context, 12)
+            setPadding(h, v, h, v)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(context, 10) }
             setOnClickListener { onClick() }
+        }
+
+    private fun rounded(fill: Int, stroke: Int?, radiusDp: Int, context: Context): GradientDrawable =
+        GradientDrawable().apply {
+            setColor(fill)
+            cornerRadius = dp(context, radiusDp).toFloat()
+            stroke?.let { setStroke(dp(context, 1), it) }
         }
 }

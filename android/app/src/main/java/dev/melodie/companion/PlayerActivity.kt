@@ -56,7 +56,12 @@ class PlayerActivity : Activity() {
         val root: LinearLayout = Ui.column(this)
         nowPlaying = Ui.label(this, "Connecting…", 20f)
         position = Ui.dim(this, "0:00 / 0:00")
-        seek = SeekBar(this)
+        seek = SeekBar(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                Ui.dp(this@PlayerActivity, 300),
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = Ui.dp(this@PlayerActivity, 8) }
+        }
         playPause = Ui.button(this, "Play") { toggle() }
         root.addView(nowPlaying)
         root.addView(position)

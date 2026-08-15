@@ -7,11 +7,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Melodie: a small, private, offline-first music player. One Rust binary crate.
 Phases 0–3 of `PLAN.md` are implemented (library scan, playback, MPRIS/
 background playback, `.m3u8` playlists, SpotiSync's Exportify-CSV sync path).
-Phases 4–7 (LAN/Subsonic server, Android companion, live librespot sync,
-CI hardening) are not built. Read `PLAN.md` before making architectural
-changes — it's the design doc this was built from, cites its research, and
-documents the tradeoffs. Read `README.md`'s "Deviations from PLAN.md"
-section too; several are load-bearing bug workarounds, not style choices.
+Phases 4–5 are also implemented: a read-only LAN/Subsonic server
+(`src/server.rs`, `src/ui/pair.rs`, gated behind the default-on `lan` cargo
+feature — see "LAN/Subsonic server and Android companion" below) and an
+Android companion app under `android/` (`docs/android.md`, `docs/lan.md`).
+Phases 6–7 (live librespot sync, CI hardening) are not built. Read
+`PLAN.md` before making architectural changes — it's the design doc this
+was built from, cites its research, and documents the tradeoffs. Read
+`README.md`'s "Deviations from PLAN.md" section too; several are
+load-bearing bug workarounds, not style choices.
 
 ## Commands
 
@@ -168,6 +172,62 @@ full DB rows rather than just whatever the current UI reads — they're
 `#[allow(dead_code)]`-annotated for the fields nothing reads yet rather than
 trimmed, so `get_track`/`list_tracks`/etc. stay trustworthy for the next
 caller (a Subsonic server, a "loose tracks" view, whatever's next).
+
+### LAN/Subsonic server and Android companion
+
+Everything here is gated behind the `lan` cargo feature, which is **on by
+default** (`default = ["lan"]` in `Cargo.toml`) — "off by default" per
+PLAN.md §7 means the *server* refuses to bind unless `config.toml` sets
+`lan_enabled = true`, not that the feature is compiled out. If the Pair
+button, `--pair`, or the LAN server all seem to be simply missing from a
+build, check whether that build was actually produced with default
+features before suspecting the UI code — `cargo build --release
+--no-default-features` (or a stale binary built before this feature
+existed) silently drops the button, `ui/pair.rs`, and `server.rs` with no
+build warning, since `#[cfg(feature = "lan")]` compiles them out entirely
+rather than disabling them at runtime.
+
+`server.rs` is a hand-written OpenSubsonic subset (`tiny_http`, XML via
+`format!`, deliberately no serialization crate for a dozen response
+elements) spawned on its own thread by `server::spawn`, held in `app.rs`
+for the process lifetime purely so its `JoinHandle` doesn't get dropped —
+never touched again after startup. It never writes to the library; every
+endpoint is read-only.
+
+**The LAN token is resolved exactly once**, in `app.rs::run()`, before
+either the server or the Pair button's callback are created — both then
+clone from that single already-resolved `Config`. This fixes a real
+first-run race: resolving the token separately in each block let the
+server generate+save token A while the pair-button closure (holding an
+earlier `Config` clone) generated a different token B and displayed *that*
+in the QR code, pairing against a server that only accepted A. Don't
+reintroduce a second `ensure_lan_token()` call anywhere in the startup
+path.
+
+The Android app (`android/`) is a deliberately dependency-starved Subsonic
+client: exactly three third-party deps
+(`media3-exoplayer`, `media3-session`, `zxing-android-embedded`), enforced
+by not pulling in `androidx.activity`/AppCompat — which is why
+`PairActivity`'s QR scan uses the classic `startActivityForResult` API
+instead of `ScanContract`/`registerForActivityResult` (see the doc comment
+at the top of `PairActivity.kt`). `Ui.kt` builds every screen's views in
+code for the same reason (no layout inflation, no XML resources); its
+palette is meant to track `src/ui/theme.rs`'s hex values by hand, not via
+any shared source of truth, so a desktop theme change needs a manual
+matching edit there. `ScanOptions` must **not** get `.setOrientationLocked(false)`
+— that was tried once and made the scanner activity rotate to landscape on
+its own (full-sensor mode) instead of staying locked to the app's normal
+portrait orientation; the default (locked) is correct and matches every
+other screen in the app.
+
+`LibraryActivity`'s offline fallback (`showOfflineFallback`) is the
+mobile-side counterpart of "filesystem is the source of truth" above: if
+the server is unreachable, it synthesizes playlists from whatever
+`LocalLibrary` already has on disk (marked with an empty `RemotePlaylist.id`
+so the rest of the screen knows to skip network calls for it) rather than
+stranding already-synced tracks. Sync itself only ever runs in the
+foreground on an explicit tap — no `WorkManager`, no background scheduler,
+by design (`docs/android.md`'s "Deliberate limits").
 
 ### UI
 

@@ -50,7 +50,6 @@ class PairActivity : Activity() {
             val options = ScanOptions()
                 .setPrompt("Point at the code on your computer")
                 .setBeepEnabled(false)
-                .setOrientationLocked(false)
             startActivityForResult(options.createScanIntent(this), SCAN_REQUEST)
         })
 
