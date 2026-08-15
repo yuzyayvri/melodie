@@ -18,6 +18,8 @@ import com.google.common.util.concurrent.ListenableFuture
 /** Handoff from the library screen; cleared as soon as it is consumed. */
 object Queue {
     var pending: List<LocalSong> = emptyList()
+    /** Mirrors the last Shuffle toggle so the next queued playlist starts shuffled too. */
+    var shuffleEnabled: Boolean = false
 }
 
 class PlayerActivity : Activity() {
@@ -34,6 +36,7 @@ class PlayerActivity : Activity() {
     private lateinit var position: TextView
     private lateinit var seek: SeekBar
     private lateinit var playPause: android.widget.Button
+    private lateinit var shuffleBtn: android.widget.Button
     private var userIsSeeking = false
 
     private val tick = object : Runnable {
@@ -63,13 +66,17 @@ class PlayerActivity : Activity() {
             ).apply { topMargin = Ui.dp(this@PlayerActivity, 8) }
         }
         playPause = Ui.button(this, "Play") { toggle() }
+        shuffleBtn = Ui.button(this, "Shuffle") { toggleShuffle() }
+        root.addView(Ui.topBar(this, "Now Playing") { finish() })
         root.addView(nowPlaying)
         root.addView(position)
         root.addView(seek)
         root.addView(playPause)
         root.addView(Ui.button(this, "Previous") { controller?.seekToPreviousMediaItem() })
         root.addView(Ui.button(this, "Next") { controller?.seekToNextMediaItem() })
+        root.addView(shuffleBtn)
         setContentView(root)
+        updateShuffleColor()
 
         seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {}
@@ -111,6 +118,7 @@ class PlayerActivity : Activity() {
                 return@addListener
             }
             controller = c
+            c.shuffleModeEnabled = Queue.shuffleEnabled
             val queue = Queue.pending
             if (queue.isNotEmpty()) {
                 Queue.pending = emptyList()
@@ -118,6 +126,7 @@ class PlayerActivity : Activity() {
                 c.prepare()
                 c.play()
             }
+            updateShuffleColor()
             main.post(tick)
         }, java.util.concurrent.Executor { main.post(it) })
     }
@@ -137,6 +146,24 @@ class PlayerActivity : Activity() {
     private fun toggle() {
         val c = controller ?: return
         if (c.isPlaying) c.pause() else c.play()
+    }
+
+    /**
+     * Toggles Media3's built-in shuffle rather than reordering the queue
+     * ourselves (unlike desktop's `shuffle_in_place`, src/app.rs) —
+     * ExoPlayer/MediaController already makes seekToNext/PreviousMediaItem
+     * respect shuffle order once this flag is set.
+     */
+    private fun toggleShuffle() {
+        Queue.shuffleEnabled = !Queue.shuffleEnabled
+        controller?.shuffleModeEnabled = Queue.shuffleEnabled
+        updateShuffleColor()
+    }
+
+    private fun updateShuffleColor() {
+        (shuffleBtn.background as? android.graphics.drawable.GradientDrawable)?.setColor(
+            if (Queue.shuffleEnabled) Ui.ACCENT else Ui.BG_ALT
+        )
     }
 
     private fun clock(ms: Long): String {
