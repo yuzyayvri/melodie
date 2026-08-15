@@ -70,6 +70,104 @@ impl LibraryState {
     }
 }
 
+/// Which column the currently-displayed list is sorted by (ignored while
+/// shuffle is on — shuffle overrides sort, search still filters either way).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SortField {
+    #[default]
+    Title,
+    Artist,
+    Album,
+    Duration,
+}
+
+impl SortField {
+    fn from_choice_index(idx: i32) -> Self {
+        match idx {
+            1 => SortField::Artist,
+            2 => SortField::Album,
+            3 => SortField::Duration,
+            _ => SortField::Title,
+        }
+    }
+}
+
+/// Search/sort/shuffle applied on top of whatever `playlist_choice` selects.
+/// Lives outside `LibraryState` because it doesn't change when the DB cache
+/// reloads — a rescan or SpotiSync download should re-apply it, not reset it.
+#[derive(Default)]
+struct ViewState {
+    search: String,
+    sort: SortField,
+    shuffle: bool,
+}
+
+/// Fisher-Yates shuffle with a tiny xorshift64 PRNG seeded off the clock —
+/// this only needs to feel random for "shuffle play", not be
+/// cryptographically sound, so no `rand` dependency.
+fn shuffle_in_place<T>(items: &mut [T]) {
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+        | 1;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for i in (1..items.len()).rev() {
+        let j = (next() % (i as u64 + 1)) as usize;
+        items.swap(i, j);
+    }
+}
+
+/// Search-filters, then sorts or shuffles (shuffle wins when both are set).
+/// Pure so it's testable without an FLTK window — `refresh_view` is the only
+/// caller and handles turning the result into widget state.
+fn apply_view(mut tracks: Vec<Track>, view: &ViewState) -> Vec<Track> {
+    if !view.search.is_empty() {
+        let needle = view.search.to_lowercase();
+        tracks.retain(|t| {
+            t.title.to_lowercase().contains(&needle)
+                || t.artist.to_lowercase().contains(&needle)
+                || t.album.to_lowercase().contains(&needle)
+        });
+    }
+    if view.shuffle {
+        shuffle_in_place(&mut tracks);
+    } else {
+        match view.sort {
+            SortField::Title => tracks.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+            SortField::Artist => tracks.sort_by(|a, b| a.artist.to_lowercase().cmp(&b.artist.to_lowercase())),
+            SortField::Album => tracks.sort_by(|a, b| a.album.to_lowercase().cmp(&b.album.to_lowercase())),
+            SortField::Duration => tracks.sort_by_key(|t| t.duration_ms),
+        }
+    }
+    tracks
+}
+
+/// Recomputes the displayed rows and the staged play queue for
+/// `playlist_idx`, applying search/sort/shuffle from `view`. The single
+/// place `tracks_for` output turns into `list`/`current_queue` — called on
+/// playlist switch, search/sort/shuffle changes, and library reloads, so
+/// none of those paths can drift out of sync with each other.
+fn refresh_view(
+    db: &Db,
+    lib_state: &Rc<RefCell<LibraryState>>,
+    playlist_idx: i32,
+    list: &mut ui::list::TrackList,
+    current_queue: &Rc<RefCell<Vec<QueueTrack>>>,
+    view: &Rc<RefCell<ViewState>>,
+) {
+    let tracks = lib_state.borrow().tracks_for(db, playlist_idx);
+    let tracks = apply_view(tracks, &view.borrow());
+
+    *current_queue.borrow_mut() = tracks.iter().map(to_queue_track).collect();
+    list.set_rows(tracks.iter().map(to_row).collect());
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct PersistedState {
@@ -169,12 +267,13 @@ pub fn run(cfg: Config, db: Db) -> ExitCode {
     let lib_state: Rc<RefCell<LibraryState>> = Rc::new(RefCell::new(LibraryState::load(&db)));
 
     let current_queue: Rc<RefCell<Vec<QueueTrack>>> = Rc::new(RefCell::new(Vec::new()));
+    let view_state: Rc<RefCell<ViewState>> = Rc::new(RefCell::new(ViewState::default()));
 
     // Fills the playlist choice, and refreshes the list/queue for whatever
     // is currently selected. Used at startup and whenever a scan or
     // SpotiSync download changes the library (PLAN.md §3: filesystem is the
     // source of truth, so the UI just re-reads the DB cache of it).
-    repopulate_from(&db, &lib_state, &mut win, &current_queue);
+    repopulate_from(&db, &lib_state, &mut win, &current_queue, &view_state);
 
     let (engine_tx, _engine_handle) = engine::spawn(state.volume, move |ev| {
         msg_tx.send(Message::Engine(ev));
@@ -299,12 +398,57 @@ pub fn run(cfg: Config, db: Db) -> ExitCode {
         let db = db.clone();
         let lib_state = lib_state.clone();
         let current_queue = current_queue.clone();
+        let view_state = view_state.clone();
         let mut list = win.list.clone();
         win.playlist_choice.set_callback(move |c| {
-            let idx = c.value();
-            let tracks = lib_state.borrow().tracks_for(&db, idx);
-            *current_queue.borrow_mut() = tracks.iter().map(to_queue_track).collect();
-            list.set_rows(tracks.iter().map(to_row).collect());
+            refresh_view(&db, &lib_state, c.value(), &mut list, &current_queue, &view_state);
+        });
+    }
+
+    // Search filters (title/artist/album substring); sort picks the column;
+    // shuffle overrides sort. All three re-run through the same refresh_view
+    // used above, against whatever playlist is currently selected.
+    {
+        let db = db.clone();
+        let lib_state = lib_state.clone();
+        let current_queue = current_queue.clone();
+        let view_state = view_state.clone();
+        let mut list = win.list.clone();
+        let playlist_choice = win.playlist_choice.clone();
+        win.search.set_callback(move |s| {
+            view_state.borrow_mut().search = s.value();
+            refresh_view(&db, &lib_state, playlist_choice.value(), &mut list, &current_queue, &view_state);
+        });
+    }
+    {
+        let db = db.clone();
+        let lib_state = lib_state.clone();
+        let current_queue = current_queue.clone();
+        let view_state = view_state.clone();
+        let mut list = win.list.clone();
+        let playlist_choice = win.playlist_choice.clone();
+        win.sort_choice.set_callback(move |c| {
+            view_state.borrow_mut().sort = SortField::from_choice_index(c.value());
+            refresh_view(&db, &lib_state, playlist_choice.value(), &mut list, &current_queue, &view_state);
+        });
+    }
+    {
+        let db = db.clone();
+        let lib_state = lib_state.clone();
+        let current_queue = current_queue.clone();
+        let view_state = view_state.clone();
+        let mut list = win.list.clone();
+        let playlist_choice = win.playlist_choice.clone();
+        let mut btn = win.shuffle_btn.clone();
+        win.shuffle_btn.set_callback(move |_| {
+            let enabled = {
+                let mut v = view_state.borrow_mut();
+                v.shuffle = !v.shuffle;
+                v.shuffle
+            };
+            btn.set_label_color(if enabled { ui::theme::ACCENT } else { ui::theme::FG_DIM });
+            btn.redraw();
+            refresh_view(&db, &lib_state, playlist_choice.value(), &mut list, &current_queue, &view_state);
         });
     }
 
@@ -448,6 +592,7 @@ pub fn run(cfg: Config, db: Db) -> ExitCode {
                     &lib_state,
                     &mut win,
                     &current_queue,
+                    &view_state,
                     &review_win,
                 ),
                 Message::ShowWindow => win.win.show(),
@@ -478,17 +623,18 @@ fn handle_worker_event(
     lib_state: &Rc<RefCell<LibraryState>>,
     win: &mut ui::MainWindow,
     current_queue: &Rc<RefCell<Vec<QueueTrack>>>,
+    view_state: &Rc<RefCell<ViewState>>,
     review_win: &Rc<RefCell<ui::review::ReviewWindow>>,
 ) {
     match ev {
         WorkerEvent::SyncFinished { playlists, tracks } => {
             eprintln!("melodie: spotisync: synced {playlists} playlist(s), {tracks} track(s) seen");
             *lib_state.borrow_mut() = LibraryState::load(db);
-            repopulate_from(db, lib_state, win, current_queue);
+            repopulate_from(db, lib_state, win, current_queue, view_state);
         }
         WorkerEvent::LibraryChanged => {
             *lib_state.borrow_mut() = LibraryState::load(db);
-            repopulate_from(db, lib_state, win, current_queue);
+            repopulate_from(db, lib_state, win, current_queue, view_state);
         }
         WorkerEvent::ReviewQueueChanged => {
             let mut rw = review_win.borrow_mut();
@@ -505,6 +651,7 @@ fn repopulate_from(
     lib_state: &Rc<RefCell<LibraryState>>,
     win: &mut ui::MainWindow,
     current_queue: &Rc<RefCell<Vec<QueueTrack>>>,
+    view_state: &Rc<RefCell<ViewState>>,
 ) {
     let state = lib_state.borrow();
     let selected_name = if win.playlist_choice.value() <= 0 { None } else { win.playlist_choice.choice() };
@@ -518,10 +665,9 @@ fn repopulate_from(
         .map(|i| (i + 1) as i32)
         .unwrap_or(0);
     win.playlist_choice.set_value(new_idx);
+    drop(state);
 
-    let tracks = state.tracks_for(db, new_idx);
-    *current_queue.borrow_mut() = tracks.iter().map(to_queue_track).collect();
-    win.list.set_rows(tracks.iter().map(to_row).collect());
+    refresh_view(db, lib_state, new_idx, &mut win.list, current_queue, view_state);
 
     match db.pending_and_running_job_count() {
         Ok(0) | Err(_) => win.sync_btn.set_label("Sync"),
@@ -649,5 +795,59 @@ mod tests {
         let cfg = Config { data_dir: dir, ..Config::default() };
         let loaded = PersistedState::load(&cfg);
         assert_eq!(loaded.last_track_id, None);
+    }
+
+    fn track(id: i64, title: &str, artist: &str, album: &str, duration_ms: i64) -> Track {
+        Track {
+            id,
+            path: format!("{title}.wav"),
+            title: title.to_string(),
+            artist: artist.to_string(),
+            album: album.to_string(),
+            track_no: None,
+            duration_ms,
+            mtime: 0,
+            size: 0,
+            added_at: 0,
+        }
+    }
+
+    fn sample_tracks() -> Vec<Track> {
+        vec![
+            track(1, "Beta Track", "Artist Two", "Album B", 200_000),
+            track(2, "Alpha Song", "Artist One", "Album A", 100_000),
+            track(3, "Gamma Tune", "Artist One", "Album C", 50_000),
+        ]
+    }
+
+    #[test]
+    fn apply_view_filters_case_insensitively_across_title_artist_album() {
+        let view = ViewState { search: "one".to_string(), ..Default::default() };
+        let got: Vec<_> = apply_view(sample_tracks(), &view).into_iter().map(|t| t.id).collect();
+        assert_eq!(got, vec![2, 3]); // both have "Artist One"
+    }
+
+    #[test]
+    fn apply_view_sorts_by_each_field() {
+        let by_title: Vec<_> = apply_view(sample_tracks(), &ViewState { sort: SortField::Title, ..Default::default() })
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(by_title, vec![2, 1, 3]); // Alpha, Beta, Gamma
+
+        let by_duration: Vec<_> =
+            apply_view(sample_tracks(), &ViewState { sort: SortField::Duration, ..Default::default() })
+                .into_iter()
+                .map(|t| t.id)
+                .collect();
+        assert_eq!(by_duration, vec![3, 2, 1]); // 50k, 100k, 200k
+    }
+
+    #[test]
+    fn apply_view_shuffle_overrides_sort_but_keeps_the_same_set() {
+        let view = ViewState { sort: SortField::Title, shuffle: true, ..Default::default() };
+        let mut got: Vec<_> = apply_view(sample_tracks(), &view).into_iter().map(|t| t.id).collect();
+        got.sort();
+        assert_eq!(got, vec![1, 2, 3]); // shuffled, but still the same three tracks
     }
 }

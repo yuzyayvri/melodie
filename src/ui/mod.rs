@@ -8,6 +8,7 @@ use fltk::button::Button;
 use fltk::enums::{Align, CallbackTrigger, Color, Event, FrameType};
 use fltk::frame::Frame;
 use fltk::group::Group;
+use fltk::input::Input;
 use fltk::menu::Choice;
 use fltk::prelude::*;
 use fltk::valuator::HorNiceSlider;
@@ -23,6 +24,8 @@ const PAD: i32 = 8;
 pub struct MainWindow {
     pub win: Window,
     pub playlist_choice: Choice,
+    pub search: Input,
+    pub sort_choice: Choice,
     pub sync_btn: Button,
     pub review_btn: Button,
     #[cfg(feature = "lan")]
@@ -31,6 +34,7 @@ pub struct MainWindow {
     pub play_btn: Button,
     pub next_btn: Button,
     pub loop_btn: Button,
+    pub shuffle_btn: Button,
     pub seek: HorNiceSlider,
     pub time_label: Frame,
     pub volume: HorNiceSlider,
@@ -65,24 +69,36 @@ pub fn build() -> MainWindow {
     bar.set_color(theme::BG_ALT);
 
     let choice_w = 140;
+    let sort_w = 84;
     let sync_w = 50;
     let review_w = 64;
     #[cfg(feature = "lan")]
     let pair_w = 46;
     #[cfg(not(feature = "lan"))]
     let pair_w = 0;
-    let cluster_w = pair_w + sync_w + 4 + review_w + 4 + choice_w + if pair_w > 0 { 4 } else { 0 };
+    let cluster_w =
+        pair_w + sync_w + 4 + review_w + 4 + sort_w + 4 + choice_w + if pair_w > 0 { 4 } else { 0 };
 
     let mut playlist_choice = Choice::new(WIN_W - choice_w - PAD, 6, choice_w, 24, None);
     playlist_choice.set_color(theme::BG);
     playlist_choice.set_label_color(theme::FG);
     playlist_choice.set_text_color(theme::FG);
 
-    let mut review_btn = Button::new(WIN_W - choice_w - review_w - PAD - 4, 6, review_w, 24, "Review");
-    let mut sync_btn = Button::new(WIN_W - choice_w - review_w - sync_w - PAD - 8, 6, sync_w, 24, "Sync");
+    let mut sort_choice = Choice::new(WIN_W - choice_w - sort_w - PAD - 4, 6, sort_w, 24, None);
+    sort_choice.set_color(theme::BG);
+    sort_choice.set_label_color(theme::FG);
+    sort_choice.set_text_color(theme::FG);
+    for label in ["Title", "Artist", "Album", "Duration"] {
+        sort_choice.add_choice(label);
+    }
+    sort_choice.set_value(0);
+
+    let mut review_btn = Button::new(WIN_W - choice_w - sort_w - review_w - PAD - 8, 6, review_w, 24, "Review");
+    let mut sync_btn =
+        Button::new(WIN_W - choice_w - sort_w - review_w - sync_w - PAD - 12, 6, sync_w, 24, "Sync");
     #[cfg(feature = "lan")]
     let mut pair_btn = Button::new(
-        WIN_W - choice_w - review_w - sync_w - pair_w - PAD - 12,
+        WIN_W - choice_w - sort_w - review_w - sync_w - pair_w - PAD - 16,
         6,
         pair_w,
         24,
@@ -105,11 +121,21 @@ pub fn build() -> MainWindow {
         add_hover(&mut pair_btn, theme::BG, theme::BTN_HOVER);
     }
 
-    let mut now_playing = Frame::new(PAD, 6, WIN_W - PAD * 3 - cluster_w, 24, None);
+    let now_playing_w = 220;
+    let mut now_playing = Frame::new(PAD, 6, now_playing_w, 24, None);
     now_playing.set_label_color(theme::FG);
     now_playing.set_label_size(theme::FONT_SIZE + 1);
     now_playing.set_align(Align::Left | Align::Inside);
     now_playing.set_label("Nothing playing");
+
+    let search_x = PAD + now_playing_w + PAD;
+    let mut search = Input::new(search_x, 6, WIN_W - PAD * 2 - cluster_w - search_x, 24, None);
+    search.set_color(theme::BG_ALT);
+    search.set_text_color(theme::FG);
+    search.set_text_font(theme::FONT);
+    search.set_text_size(theme::FONT_SIZE);
+    search.set_trigger(CallbackTrigger::Changed);
+    search.set_tooltip("Search title/artist/album");
 
     let btn_y = 36;
     let mut prev_btn = Button::new(PAD, btn_y, 36, 32, "@|<");
@@ -129,9 +155,16 @@ pub fn build() -> MainWindow {
     loop_btn.set_frame(theme::BUTTON_FRAME);
     add_hover(&mut loop_btn, theme::BG, theme::BTN_HOVER);
 
+    let mut shuffle_btn = Button::new(PAD + 182, btn_y, 60, 32, "Shuffle");
+    shuffle_btn.set_color(theme::BG);
+    shuffle_btn.set_label_color(theme::FG_DIM);
+    shuffle_btn.set_label_size(theme::FONT_SIZE - 1);
+    shuffle_btn.set_frame(theme::BUTTON_FRAME);
+    add_hover(&mut shuffle_btn, theme::BG, theme::BTN_HOVER);
+
     let time_w = 90;
     let vol_w = 100;
-    let seek_x = PAD + 186;
+    let seek_x = PAD + 250;
     let seek_w = WIN_W - seek_x - time_w - vol_w - PAD * 2;
     let mut seek = HorNiceSlider::new(seek_x, btn_y, seek_w, 32, None);
     seek.set_range(0.0, 1.0);
@@ -160,6 +193,8 @@ pub fn build() -> MainWindow {
     MainWindow {
         win,
         playlist_choice,
+        search,
+        sort_choice,
         sync_btn,
         review_btn,
         #[cfg(feature = "lan")]
@@ -168,6 +203,7 @@ pub fn build() -> MainWindow {
         play_btn,
         next_btn,
         loop_btn,
+        shuffle_btn,
         seek,
         time_label,
         volume,
