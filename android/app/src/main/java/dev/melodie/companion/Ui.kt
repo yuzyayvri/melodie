@@ -38,6 +38,18 @@ object Ui {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
+        // targetSdk 36 enforces edge-to-edge, so content draws under the
+        // status bar / camera cutout / nav bar unless padded for it. Fixed
+        // once here (every screen's root is `column()`) rather than per
+        // activity. `systemWindowInsetTop/Bottom` (deprecated in API 30
+        // favor of `WindowInsets.Type`) is used on purpose: it's been
+        // functional since API 20, so there's no SDK_INT branch needed
+        // against this app's minSdk 24.
+        setOnApplyWindowInsetsListener { v, insets ->
+            @Suppress("DEPRECATION")
+            v.setPadding(p, p + insets.systemWindowInsetTop, p, p + insets.systemWindowInsetBottom)
+            insets
+        }
     }
 
     fun label(context: Context, text: String, size: Float = 16f): TextView =
