@@ -11,6 +11,32 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.Toast
 
+enum class SortField { TITLE, ARTIST, ALBUM, DURATION }
+
+/**
+ * Filters `songs` by substring across title/artist/album (case-insensitive),
+ * then sorts by `sort`. Pure and framework-free on purpose — testable on
+ * the JVM, mirroring the desktop's `apply_view` (src/app.rs).
+ */
+fun filterAndSortSongs(songs: List<RemoteSong>, query: String, sort: SortField): List<RemoteSong> {
+    val filtered = if (query.isBlank()) {
+        songs
+    } else {
+        val needle = query.lowercase()
+        songs.filter {
+            it.title.lowercase().contains(needle) ||
+                it.artist.lowercase().contains(needle) ||
+                it.album.lowercase().contains(needle)
+        }
+    }
+    return when (sort) {
+        SortField.TITLE -> filtered.sortedBy { it.title.lowercase() }
+        SortField.ARTIST -> filtered.sortedBy { it.artist.lowercase() }
+        SortField.ALBUM -> filtered.sortedBy { it.album.lowercase() }
+        SortField.DURATION -> filtered.sortedBy { it.durationSec }
+    }
+}
+
 /**
  * One screen, two modes: the server's playlists, and the tracks inside the
  * one you tapped. Playlists are synced individually — mirroring the whole
