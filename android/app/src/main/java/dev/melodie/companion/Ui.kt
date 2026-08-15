@@ -2,7 +2,9 @@ package dev.melodie.companion
 
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
@@ -51,6 +53,51 @@ object Ui {
             insets
         }
     }
+
+    /**
+     * A back chevron (only when `onBack` is non-null) plus a bold title —
+     * the hand-rolled stand-in for a `Toolbar`/`ActionBar`, which would
+     * pull in `androidx.activity`/AppCompat. Every non-root screen gets
+     * one so there's always an on-screen way back, not just gesture/system
+     * back.
+     */
+    fun topBar(context: Context, title: String, onBack: (() -> Unit)?): LinearLayout =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+            if (onBack != null) {
+                addView(TextView(context).apply {
+                    text = "‹" // ‹
+                    textSize = 22f
+                    setTextColor(FG)
+                    gravity = Gravity.CENTER
+                    minWidth = dp(context, 48)
+                    minHeight = dp(context, 48)
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener { onBack() }
+                })
+            }
+            addView(TextView(context).apply {
+                text = title
+                textSize = 18f
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(FG)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                val leftPad = if (onBack != null) 0 else dp(context, 12)
+                setPadding(leftPad, dp(context, 8), dp(context, 12), dp(context, 8))
+                layoutParams = LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f,
+                )
+            })
+        }
 
     fun label(context: Context, text: String, size: Float = 16f): TextView =
         TextView(context).apply {
