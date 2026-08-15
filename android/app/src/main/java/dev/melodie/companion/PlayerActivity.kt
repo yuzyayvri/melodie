@@ -161,9 +161,8 @@ class PlayerActivity : Activity() {
     }
 
     private fun updateShuffleColor() {
-        (shuffleBtn.background as? android.graphics.drawable.GradientDrawable)?.setColor(
-            if (Queue.shuffleEnabled) Ui.ACCENT else Ui.BG_ALT
-        )
+        shuffleBtn.setTextColor(if (Queue.shuffleEnabled) Ui.ACCENT else Ui.FG_DIM)
+        (shuffleBtn.background as? android.graphics.drawable.GradientDrawable)?.setColor(Ui.BG_ALT)
     }
 
     private fun clock(ms: Long): String {

@@ -64,6 +64,8 @@ class LibraryActivity : Activity() {
     private var sortSpinner: Spinner? = null
     private var searchQuery: String = ""
     private var sortField: SortField = SortField.TITLE
+    private var localForPlaylist: List<LocalSong> = emptyList()
+    private var haveIdsForPlaylist: Set<String> = emptySet()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -222,7 +224,28 @@ class LibraryActivity : Activity() {
         sortField = SortField.TITLE
         setTopBar(playlist.name) { showPlaylists() }
         setupSearchAndSortBar(playlist)
+        refreshLocalSnapshot(playlist)
         renderSongs(playlist)
+    }
+
+    /**
+     * Snapshots on-disk sync state and the sync-button's visibility — both
+     * only actually change when a playlist is opened or a sync completes,
+     * not on every keystroke/spinner selection, so this is only called from
+     * `showSongs` and `startSync`'s `onDone`, not from `renderSongs`.
+     */
+    private fun refreshLocalSnapshot(playlist: RemotePlaylist) {
+        localForPlaylist = LocalLibrary.load(filesDir).filter { it.playlist == playlist.name }
+        haveIdsForPlaylist = localForPlaylist.map { it.id }.toSet()
+        if (playlist.id.isEmpty()) {
+            // No RemotePlaylist.id to sync against for an offline entry —
+            // there's nothing a Sync button could do here that hasn't
+            // already happened.
+            syncButtonView?.let { root.removeView(it) }
+            syncButtonView = null
+        } else {
+            syncButton(playlist)
+        }
     }
 
     private fun setupSearchAndSortBar(playlist: RemotePlaylist) {
@@ -230,6 +253,7 @@ class LibraryActivity : Activity() {
         sortSpinner?.let { root.removeView(it) }
 
         val input = Ui.input(this, "Search songs")
+        input.isSingleLine = true
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -269,39 +293,33 @@ class LibraryActivity : Activity() {
     }
 
     /**
-     * The single place the song list's rows, status text, sync button, and
-     * tap-to-play ordering get built from `songs` + the current
-     * search/sort state. Queuing from the *displayed* (filtered/sorted)
-     * order — not the server's raw order — is the fix: previously a tap
-     * always queued from `songs` even though nothing kept that in sync with
-     * what was on screen.
+     * The single place the song list's rows and tap-to-play ordering get
+     * built from `songs` + the current search/sort state. Queuing from the
+     * *displayed* (filtered/sorted) order — not the server's raw order — is
+     * the fix: previously a tap always queued from `songs` even though
+     * nothing kept that in sync with what was on screen. Called on every
+     * keystroke/spinner change, so it does no disk I/O and doesn't touch
+     * the sync button — those only change when a playlist opens or a sync
+     * finishes, and live in `refreshLocalSnapshot` instead.
      */
     private fun renderSongs(playlist: RemotePlaylist) {
-        val local = LocalLibrary.load(filesDir).filter { it.playlist == playlist.name }
-        val haveIds = local.map { it.id }.toSet()
         val displayed = filterAndSortSongs(songs, searchQuery, sortField)
         val rows = displayed.map { s ->
-            val subtitle = if (s.id in haveIds) s.artist else "${s.artist}  (not synced)"
+            val subtitle = if (s.id in haveIdsForPlaylist) s.artist else "${s.artist}  (not synced)"
             s.title to subtitle
         }
-        status.text = "${playlist.name} — ${haveIds.size}/${songs.size} on this phone"
+        status.text = "${playlist.name} — ${haveIdsForPlaylist.size}/${songs.size} on this phone"
         list.adapter = Ui.twoLineAdapter(this, rows)
         list.setOnItemClickListener { _, _, index, _ ->
             val song = displayed[index]
-            val localSong = local.firstOrNull { it.id == song.id }
+            val localSong = localForPlaylist.firstOrNull { it.id == song.id }
             if (localSong == null) {
                 Toast.makeText(this, "Sync this playlist first", Toast.LENGTH_SHORT).show()
             } else {
-                val ordered = displayed.mapNotNull { s -> local.firstOrNull { it.id == s.id } }
+                val ordered = displayed.mapNotNull { s -> localForPlaylist.firstOrNull { it.id == s.id } }
                 val start = ordered.indexOfFirst { it.id == song.id }
                 startPlayback(ordered, if (start < 0) 0 else start)
             }
-        }
-        if (playlist.id.isEmpty()) {
-            syncButtonView?.let { root.removeView(it) }
-            syncButtonView = null
-        } else {
-            syncButton(playlist)
         }
     }
 
@@ -330,12 +348,16 @@ class LibraryActivity : Activity() {
             },
             onDone = { synced, failed ->
                 main.post {
+                    refreshLocalSnapshot(playlist)
+                    renderSongs(playlist)
+                    // Set after the render call so this sync-result line
+                    // isn't immediately clobbered by renderSongs' own
+                    // "n/m on this phone" status text.
                     status.text = if (failed == 0) {
                         "${playlist.name}: $synced tracks on this phone"
                     } else {
                         "${playlist.name}: $synced synced, $failed failed"
                     }
-                    renderSongs(playlist)
                 }
             },
         )

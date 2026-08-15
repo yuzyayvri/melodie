@@ -35,4 +35,9 @@ class LibraryActivityTest {
     fun noMatchesReturnsEmptyList() {
         assertEquals(emptyList<RemoteSong>(), filterAndSortSongs(songs, "zzz", SortField.TITLE))
     }
+
+    @Test
+    fun sortFieldOrderMatchesSpinnerLabels() {
+        assertEquals(listOf("TITLE", "ARTIST", "ALBUM", "DURATION"), SortField.entries.map { it.name })
+    }
 }
