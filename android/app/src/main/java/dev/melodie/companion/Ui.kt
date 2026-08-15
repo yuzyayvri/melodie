@@ -7,6 +7,7 @@ import android.graphics.drawable.GradientDrawable
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.ViewGroup
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -140,6 +141,36 @@ object Ui {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(context, 10) }
             setOnClickListener { onClick() }
+        }
+
+    /**
+     * Native two-line row (`simple_list_item_2`) styled to match the
+     * desktop's bold-title/dim-subtitle track rows (`ui/list.rs`) —
+     * replaces packing "title\nsubtitle" into one TextView. Still plain
+     * `ArrayAdapter`/`ListView`, not `RecyclerView`: `ListView`'s built-in
+     * view recycling already covers "stay lightweight at any library
+     * size," so there's nothing a new dependency would buy here.
+     */
+    fun twoLineAdapter(context: Context, rows: List<Pair<String, String>>): ArrayAdapter<String> =
+        object : ArrayAdapter<String>(
+            context,
+            android.R.layout.simple_list_item_2,
+            android.R.id.text1,
+            rows.map { it.first },
+        ) {
+            override fun getView(position: Int, convertView: android.view.View?, parent: ViewGroup): android.view.View {
+                val view = super.getView(position, convertView, parent)
+                view.findViewById<TextView>(android.R.id.text1).apply {
+                    text = rows[position].first
+                    setTextColor(FG)
+                }
+                view.findViewById<TextView>(android.R.id.text2).apply {
+                    text = rows[position].second
+                    setTextColor(FG_DIM)
+                }
+                view.setBackgroundColor(if (position % 2 == 0) BG else BG_ALT)
+                return view
+            }
         }
 
     private fun rounded(fill: Int, stroke: Int?, radiusDp: Int, context: Context): GradientDrawable =
