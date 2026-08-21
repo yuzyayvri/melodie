@@ -543,6 +543,7 @@ pub fn run(cfg: Config, db: Db) -> ExitCode {
     // Right or N/P previous/next track. Checked as a window-level Shortcut
     // handler so it works regardless of which child widget has focus.
     let current_pos = Rc::new(Cell::new(0.0f64));
+    let is_playing = Rc::new(Cell::new(false));
     {
         let engine_tx = engine_tx.clone();
         let current_pos = current_pos.clone();
@@ -584,7 +585,7 @@ pub fn run(cfg: Config, db: Db) -> ExitCode {
         while let Some(msg) = msg_rx.recv() {
             match msg {
                 Message::Engine(ev) => {
-                    handle_engine_event(ev, &mut win, &current_pos, &last_track, &mut media_controls)
+                    handle_engine_event(ev, &mut win, &current_pos, &is_playing, &last_track, &mut media_controls)
                 }
                 Message::Worker(ev) => handle_worker_event(
                     ev,
@@ -679,6 +680,7 @@ fn handle_engine_event(
     ev: EngineEvent,
     win: &mut ui::MainWindow,
     current_pos: &Rc<Cell<f64>>,
+    is_playing: &Cell<bool>,
     last_track: &Rc<Cell<Option<QueueTrack>>>,
     media_controls: &mut Option<souvlaki::MediaControls>,
 ) {
@@ -690,7 +692,11 @@ fn handle_engine_event(
             win.seek.set_range(0.0, (track.duration_ms as f64 / 1000.0).max(1.0));
             if let Some(mc) = media_controls {
                 mediakeys::update_metadata(mc, &track.title, &track.artist, &track.album, track.duration_ms);
+                // New sink always starts at 0 — reset MPRIS position immediately
+                // so clients don't see the old track's position before the next tick.
+                mediakeys::update_playback(mc, is_playing.get(), 0.0);
             }
+            current_pos.set(0.0);
             last_track.set(Some(track));
         }
         EngineEvent::Position { secs, duration_secs } => {
@@ -701,8 +707,14 @@ fn handle_engine_event(
                 ui::format_time(secs),
                 ui::format_time(duration_secs)
             ));
+            // Push position to MPRIS every tick so clients like sptlrx
+            // get smooth, drift-free progress instead of stale interpolation.
+            if let Some(mc) = media_controls {
+                mediakeys::update_playback(mc, is_playing.get(), secs);
+            }
         }
         EngineEvent::PlaybackState { playing } => {
+            is_playing.set(playing);
             win.play_btn.set_label(if playing { "@||" } else { "@>" });
             if let Some(mc) = media_controls {
                 mediakeys::update_playback(mc, playing, current_pos.get());
